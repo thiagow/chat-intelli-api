@@ -41,6 +41,7 @@ export class AutomationRedisService implements OnModuleInit, OnModuleDestroy {
       host: this.config.get<string>('redis.host', 'localhost'),
       port: this.config.get<number>('redis.port', 6379),
       password: this.config.get<string>('redis.password') || undefined,
+      tls: this.config.get<boolean>('redis.tls') ? {} : undefined,
       // Don't queue commands for an unreachable Redis — fail fast so the
       // executor falls back to "skip with redis_unavailable" and we don't
       // silently stall every event waiting for a dead Redis.

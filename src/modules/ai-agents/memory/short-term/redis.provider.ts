@@ -21,6 +21,7 @@ export const redisProvider: FactoryProvider<Redis> = {
       host: config.get<string>('REDIS_HOST', 'localhost'),
       port: config.get<number>('REDIS_PORT', 6379),
       password: config.get<string>('REDIS_PASSWORD') || undefined,
+      tls: config.get<string>('REDIS_TLS') === 'true' ? {} : undefined,
       // Required for BullMQ / long-running blocking commands compatibility.
       maxRetriesPerRequest: null,
       enableReadyCheck: false,

@@ -23,6 +23,7 @@ import { MessagesService } from './messages/messages.service';
 import { MessagesRepository } from './messages/messages.repository';
 import { TranscriptionService } from './messages/transcription.service';
 import { UploadsService } from './messages/uploads.service';
+import { StorageModule } from './messages/storage/storage.module';
 import { MediaResolverService } from './messages/media-resolver.service';
 import { ContactsController } from './contacts/contacts.controller';
 import { ContactsService } from './contacts/contacts.service';
@@ -45,6 +46,7 @@ import { ContactsRepository } from './contacts/contacts.repository';
     SegmentsModule,
     ProjectsModule,
     SalesRecoveryModule,
+    StorageModule,
   ],
   controllers: [ConversationsController, MessagesController, ContactsController],
   providers: [

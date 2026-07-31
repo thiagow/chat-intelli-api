@@ -1,10 +1,12 @@
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import { Inject, Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { STORAGE_PROVIDER, StorageProvider } from './storage/storage.provider';
 
 const execFileAsync = promisify(execFile);
 
@@ -77,20 +79,10 @@ export class UploadsService {
     'text/csv',
   ]);
 
-  private readonly rootDir: string;
-  private readonly publicBaseUrl: string;
-
-  constructor(private readonly config: ConfigService) {
-    this.rootDir = path.resolve(
-      this.config.get<string>('UPLOADS_DIR') ||
-        path.join(process.cwd(), 'uploads'),
-    );
-    const appUrl = this.config.get<string>('APP_URL') || '';
-    this.publicBaseUrl = `${appUrl.replace(/\/$/, '')}/api/v1/uploads`;
-    if (!fs.existsSync(this.rootDir)) {
-      fs.mkdirSync(this.rootDir, { recursive: true });
-    }
-  }
+  constructor(
+    private readonly config: ConfigService,
+    @Inject(STORAGE_PROVIDER) private readonly storage: StorageProvider,
+  ) {}
 
   /**
    * Persists an inbound media buffer (any type — image, video, audio,
@@ -124,12 +116,11 @@ export class UploadsService {
     if (!mime.startsWith('image/')) {
       throw new BadRequestException(`Avatar must be an image, got ${mime}`);
     }
-    const dir = path.join(this.rootDir, 'avatars');
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     const safeKey = input.key.replace(/[^a-zA-Z0-9_-]/g, '_');
     const filename = `${safeKey}${this.extFor(mime, null)}`;
-    await fs.promises.writeFile(path.join(dir, filename), input.buffer);
+    const key = `avatars/${filename}`;
+    await this.storage.write(key, input.buffer, mime);
     // O nome do arquivo é estável (um por contato), então sem versão na URL o
     // navegador continuaria mostrando a foto antiga depois de a pessoa trocar
     // a dela. Versionamos pelo CONTEÚDO, não pelo horário: foto igual devolve
@@ -140,7 +131,7 @@ export class UploadsService {
       .update(input.buffer)
       .digest('hex')
       .slice(0, 12);
-    return `${this.publicBaseUrl}/avatars/${filename}?v=${version}`;
+    return `${this.storage.publicUrl(key)}?v=${version}`;
   }
 
   /**
@@ -148,18 +139,13 @@ export class UploadsService {
    * não existe (nunca baixado, ou perdido num redeploy). Serve de "quando
    * sincronizamos pela última vez" sem precisar de coluna nova no banco.
    */
-  avatarAgeInDays(avatarUrl: string | null | undefined): number | null {
+  async avatarAgeInDays(avatarUrl: string | null | undefined): Promise<number | null> {
     if (!avatarUrl) return null;
-    const marker = `${this.publicBaseUrl}/avatars/`;
-    if (!avatarUrl.startsWith(marker)) return null;
-    const filename = avatarUrl.slice(marker.length).split('?')[0];
-    if (!filename || filename.includes('/')) return null;
-    try {
-      const { mtimeMs } = fs.statSync(path.join(this.rootDir, 'avatars', filename));
-      return (Date.now() - mtimeMs) / 86_400_000;
-    } catch {
-      return null;
-    }
+    const key = this.storage.keyFromUrl(avatarUrl.split('?')[0]);
+    if (!key || !key.startsWith('avatars/')) return null;
+    const lastModified = await this.storage.lastModified(key);
+    if (!lastModified) return null;
+    return (Date.now() - lastModified.getTime()) / 86_400_000;
   }
 
   async saveInboundMedia(input: {
@@ -180,17 +166,15 @@ export class UploadsService {
     const mime = (input.mimeType || 'application/octet-stream').split(';')[0].trim();
     const dateFolder = new Date().toISOString().slice(0, 10);
     const safeChannel = (input.channelId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const dir = path.join(this.rootDir, 'inbound', safeChannel, dateFolder);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     const id = crypto.randomBytes(16).toString('hex');
     const ext = this.extFor(mime, input.originalFilename);
     const filename = `${id}${ext}`;
-    const fullPath = path.join(dir, filename);
-    await fs.promises.writeFile(fullPath, input.buffer);
+    const key = `inbound/${safeChannel}/${dateFolder}/${filename}`;
+    await this.storage.write(key, input.buffer, mime);
 
-    const url = `${this.publicBaseUrl}/inbound/${safeChannel}/${dateFolder}/${filename}`;
-    this.logger.log(`Inbound media saved: ${fullPath} -> ${url}`);
+    const url = this.storage.publicUrl(key);
+    this.logger.log(`Inbound media saved: ${key} -> ${url}`);
     return {
       url,
       mimeType: mime,
@@ -225,17 +209,14 @@ export class UploadsService {
     }
 
     const dateFolder = new Date().toISOString().slice(0, 10);
-    const dir = path.join(this.rootDir, 'media', dateFolder);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
     const id = crypto.randomBytes(16).toString('hex');
     const ext = this.extFor(mime, file.originalname);
     const filename = `${id}${ext}`;
-    const fullPath = path.join(dir, filename);
-    await fs.promises.writeFile(fullPath, file.buffer);
+    const key = `media/${dateFolder}/${filename}`;
+    await this.storage.write(key, file.buffer, mime);
 
-    const url = `${this.publicBaseUrl}/media/${dateFolder}/${filename}`;
-    this.logger.log(`Media saved: ${fullPath} -> ${url}`);
+    const url = this.storage.publicUrl(key);
+    this.logger.log(`Media saved: ${key} -> ${url}`);
     return {
       url,
       mimeType: mime,
@@ -264,12 +245,14 @@ export class UploadsService {
     }
 
     const dateFolder = new Date().toISOString().slice(0, 10);
-    const dir = path.join(this.rootDir, 'audio', dateFolder);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    // ffmpeg needs a real filesystem path — scratch files live in the OS
+    // temp dir regardless of storage backend, and get deleted once the
+    // final buffer is handed off to `storage.write`.
+    const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audio-'));
 
     const id = crypto.randomBytes(16).toString('hex');
     const srcExt = this.extFor(mime);
-    const srcPath = path.join(dir, `${id}${srcExt}`);
+    const srcPath = path.join(tmpDir, `${id}${srcExt}`);
     await fs.promises.writeFile(srcPath, file.buffer);
 
     // WhatsApp voice notes require OGG/Opus. Browsers (esp. Chrome/Firefox)
@@ -279,40 +262,46 @@ export class UploadsService {
     // streams webm without duration, so the <audio> element shows 0:00).
     let finalPath = srcPath;
     let finalMime = mime;
-    if (mime !== 'audio/ogg') {
-      const oggPath = path.join(dir, `${id}.ogg`);
-      try {
-        await execFileAsync(
-          'ffmpeg',
-          [
-            '-hide_banner',
-            '-loglevel', 'error',
-            '-y',
-            '-i', srcPath,
-            '-vn',
-            '-c:a', 'libopus',
-            '-b:a', '32k',
-            '-ac', '1',
-            '-ar', '48000',
-            '-application', 'voip',
-            oggPath,
-          ],
-          { timeout: 30_000 },
-        );
-        await fs.promises.unlink(srcPath).catch(() => undefined);
-        finalPath = oggPath;
-        finalMime = 'audio/ogg';
-      } catch (err: any) {
-        this.logger.error(`ffmpeg transcode failed: ${err.message}`);
-        throw new BadRequestException('Failed to process audio');
+    try {
+      if (mime !== 'audio/ogg') {
+        const oggPath = path.join(tmpDir, `${id}.ogg`);
+        try {
+          await execFileAsync(
+            'ffmpeg',
+            [
+              '-hide_banner',
+              '-loglevel', 'error',
+              '-y',
+              '-i', srcPath,
+              '-vn',
+              '-c:a', 'libopus',
+              '-b:a', '32k',
+              '-ac', '1',
+              '-ar', '48000',
+              '-application', 'voip',
+              oggPath,
+            ],
+            { timeout: 30_000 },
+          );
+          finalPath = oggPath;
+          finalMime = 'audio/ogg';
+        } catch (err: any) {
+          this.logger.error(`ffmpeg transcode failed: ${err.message}`);
+          throw new BadRequestException('Failed to process audio');
+        }
       }
-    }
 
-    const finalSize = (await fs.promises.stat(finalPath)).size;
-    const finalName = path.basename(finalPath);
-    const url = `${this.publicBaseUrl}/audio/${dateFolder}/${finalName}`;
-    this.logger.log(`Audio saved: ${finalPath} -> ${url}`);
-    return { url, mimeType: finalMime, size: finalSize, filename: finalName };
+      const finalBuffer = await fs.promises.readFile(finalPath);
+      const finalName = path.basename(finalPath);
+      const key = `audio/${dateFolder}/${finalName}`;
+      await this.storage.write(key, finalBuffer, finalMime);
+
+      const url = this.storage.publicUrl(key);
+      this.logger.log(`Audio saved: ${key} -> ${url}`);
+      return { url, mimeType: finalMime, size: finalBuffer.byteLength, filename: finalName };
+    } finally {
+      await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   private extFor(mime: string, originalFilename?: string | null): string {

@@ -54,7 +54,7 @@ export class ZappfyContactEnricherService {
 
       // Rebusca quando: nunca teve foto, o arquivo sumiu (redeploy limpa o
       // diretório, que não é volume) ou a cópia local já passou do prazo.
-      const ageDays = this.uploads.avatarAgeInDays(
+      const ageDays = await this.uploads.avatarAgeInDays(
         contactChannel.contact.avatarUrl,
       );
       const stale = ageDays === null || ageDays > maxAgeDays;

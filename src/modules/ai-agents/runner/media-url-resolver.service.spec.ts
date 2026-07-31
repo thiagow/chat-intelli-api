@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { MediaUrlResolverService } from './media-url-resolver.service';
+import { LocalStorageProvider } from '../../messaging/messages/storage/local-storage.provider';
 
 const APP_URL = 'https://api.chat.example.com';
 
@@ -20,10 +21,11 @@ function buildService(uploadsDir: string, resolveInboundMediaUrl?: jest.Mock) {
       key === 'UPLOADS_DIR' ? uploadsDir : key === 'APP_URL' ? APP_URL : undefined,
     ),
   };
+  const storage = new LocalStorageProvider(config as any);
   const service = new MediaUrlResolverService(
     prisma as any,
     adapterRegistry as any,
-    config as any,
+    storage,
   );
   return { service, prisma, adapterRegistry };
 }

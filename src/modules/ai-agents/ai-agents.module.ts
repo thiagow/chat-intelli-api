@@ -12,6 +12,7 @@ import { ModelRouterService } from './runner/model-router.service';
 import { AgentRunJanitorService } from './runner/agent-run-janitor.service';
 import { CatalogSyncService } from './runner/catalog-sync.service';
 import { MediaUrlResolverService } from './runner/media-url-resolver.service';
+import { StorageModule } from '../messaging/messages/storage/storage.module';
 import { AgentRouterService } from './router/agent-router.service';
 import { AgentsService } from './agents/agents.service';
 import { AgentsController } from './agents/agents.controller';
@@ -46,6 +47,7 @@ import { EvalsModule } from './evals/evals.module';
     ConfirmationExecutorModule,
     RagModule,
     EvalsModule,
+    StorageModule,
   ],
   controllers: [AgentsController, AiCatalogController],
   providers: [
