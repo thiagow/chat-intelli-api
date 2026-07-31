@@ -9,6 +9,10 @@ import { ZappfyModule } from './adapters/zappfy/zappfy.module';
 import { ZappfyInboundAdapter } from './adapters/zappfy/zappfy.inbound-adapter';
 import { ZappfyOutboundAdapter } from './adapters/zappfy/zappfy.outbound-adapter';
 import { ZappfySyncAdapter } from './adapters/zappfy/zappfy.sync-adapter';
+import { UazapiModule } from './adapters/uazapi/uazapi.module';
+import { UazapiInboundAdapter } from './adapters/uazapi/uazapi.inbound-adapter';
+import { UazapiOutboundAdapter } from './adapters/uazapi/uazapi.outbound-adapter';
+import { UazapiSyncAdapter } from './adapters/uazapi/uazapi.sync-adapter';
 import { WhatsAppOfficialModule } from './adapters/whatsapp-official/whatsapp-official.module';
 import { WhatsAppOfficialInboundAdapter } from './adapters/whatsapp-official/whatsapp-official.inbound-adapter';
 import { WhatsAppOfficialOutboundAdapter } from './adapters/whatsapp-official/whatsapp-official.outbound-adapter';
@@ -39,6 +43,7 @@ import { WebhookThrottleGuard } from './webhook-throttle.guard';
       { name: CHANNEL_SYNC_QUEUE },
     ),
     ZappfyModule,
+    UazapiModule,
     WhatsAppOfficialModule,
     InstagramModule,
     GmailModule,
@@ -61,6 +66,7 @@ import { WebhookThrottleGuard } from './webhook-throttle.guard';
     WebhookEventsService,
     InstagramModule,
     ZappfyModule,
+    UazapiModule,
     GmailModule,
   ],
 })
@@ -70,6 +76,9 @@ export class ChannelHubModule implements OnModuleInit {
     private readonly zappfyInbound: ZappfyInboundAdapter,
     private readonly zappfyOutbound: ZappfyOutboundAdapter,
     private readonly zappfySync: ZappfySyncAdapter,
+    private readonly uazapiInbound: UazapiInboundAdapter,
+    private readonly uazapiOutbound: UazapiOutboundAdapter,
+    private readonly uazapiSync: UazapiSyncAdapter,
     private readonly waOfficialInbound: WhatsAppOfficialInboundAdapter,
     private readonly waOfficialOutbound: WhatsAppOfficialOutboundAdapter,
     private readonly instagramInbound: InstagramInboundAdapter,
@@ -81,10 +90,12 @@ export class ChannelHubModule implements OnModuleInit {
 
   onModuleInit() {
     this.registry.register(this.zappfyInbound, this.zappfyOutbound);
+    this.registry.register(this.uazapiInbound, this.uazapiOutbound);
     this.registry.register(this.waOfficialInbound, this.waOfficialOutbound);
     this.registry.register(this.instagramInbound, this.instagramOutbound);
     this.registry.register(this.gmailInbound, this.gmailOutbound);
     this.registry.registerHistorySync(this.zappfySync);
+    this.registry.registerHistorySync(this.uazapiSync);
     this.registry.registerHistorySync(this.instagramSync);
   }
 }

@@ -24,6 +24,7 @@ enum AgentStatus {
 enum ChannelType {
   WHATSAPP_OFFICIAL
   WHATSAPP_ZAPPFY
+  WHATSAPP_UAZAPI
   INSTAGRAM
   GMAIL
 }

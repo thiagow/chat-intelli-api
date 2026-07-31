@@ -9,6 +9,7 @@ import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { NormalizedInboundMessage, StatusUpdate } from '../../channel-hub/ports/types';
 import { InstagramContactEnricherService } from '../../channel-hub/adapters/instagram/instagram-contact-enricher.service';
 import { ZappfyContactEnricherService } from '../../channel-hub/adapters/zappfy/zappfy-contact-enricher.service';
+import { UazapiContactEnricherService } from '../../channel-hub/adapters/uazapi/uazapi-contact-enricher.service';
 import { WebhookEventsService } from '../../channel-hub/webhook-events.service';
 import { AgentRouterService } from '../../ai-agents/router/agent-router.service';
 import { AiAgentRunnerService } from '../../ai-agents/runner/agent-runner.service';
@@ -91,6 +92,7 @@ export class InboundMessageProcessor extends WorkerHost {
     private readonly realtimeGateway: RealtimeGateway,
     private readonly instagramEnricher: InstagramContactEnricherService,
     private readonly zappfyEnricher: ZappfyContactEnricherService,
+    private readonly uazapiEnricher: UazapiContactEnricherService,
     private readonly webhookEvents: WebhookEventsService,
     private readonly agentRouter: AgentRouterService,
     private readonly agentRunner: AiAgentRunnerService,
@@ -167,6 +169,26 @@ export class InboundMessageProcessor extends WorkerHost {
             .enrich(channel, message.externalContactId)
             .catch((err) =>
               this.logger.warn(`Zappfy enrichment failed: ${err.message}`),
+            );
+        }
+      }
+
+      // WhatsApp via Uazapi: mesmo motor/estratégia do bloco Zappfy acima.
+      if (message.channelType === ChannelType.WHATSAPP_UAZAPI) {
+        const [channel, contact] = await Promise.all([
+          this.prisma.channel.findUnique({ where: { id: channelId } }),
+          isNewContact
+            ? Promise.resolve(null)
+            : this.prisma.contact.findUnique({
+                where: { id: contactId },
+                select: { avatarUrl: true },
+              }),
+        ]);
+        if (channel && (isNewContact || !contact?.avatarUrl)) {
+          this.uazapiEnricher
+            .enrich(channel, message.externalContactId)
+            .catch((err) =>
+              this.logger.warn(`Uazapi enrichment failed: ${err.message}`),
             );
         }
       }
