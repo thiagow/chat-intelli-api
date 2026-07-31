@@ -12,6 +12,7 @@ import { CreateChannelDto } from './dto/create-channel.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
 import { ChannelAdapterRegistry } from '../channel-adapter.registry';
 import { ZappfyHttpClient } from '../adapters/zappfy/zappfy.http-client';
+import { UazapiHttpClient } from '../adapters/uazapi/uazapi.http-client';
 import { WhatsAppOfficialHttpClient } from '../adapters/whatsapp-official/whatsapp-official.http-client';
 import { InstagramHttpClient } from '../adapters/instagram/instagram.http-client';
 import { GmailHttpClient } from '../adapters/gmail/gmail.http-client';
@@ -29,6 +30,7 @@ export class ChannelsService {
     private readonly repository: ChannelsRepository,
     private readonly adapterRegistry: ChannelAdapterRegistry,
     private readonly zappfyHttpClient: ZappfyHttpClient,
+    private readonly uazapiHttpClient: UazapiHttpClient,
     private readonly waOfficialHttpClient: WhatsAppOfficialHttpClient,
     private readonly instagramHttpClient: InstagramHttpClient,
     private readonly gmailHttpClient: GmailHttpClient,
@@ -76,10 +78,16 @@ export class ChannelsService {
     // correctly drops webhooks as "unknown locator".
     channel = (await this.enrichProviderIds(channel.id, dto.type)) ?? channel;
 
-    // Zappfy needs its webhook configured on the provider side. Fire-and-forget.
+    // Zappfy/Uazapi need their webhook configured on the provider side. Fire-and-forget.
     if (dto.type === ChannelType.WHATSAPP_ZAPPFY) {
       this.configureZappfyWebhook(channel.id).catch((err) =>
         this.logger.warn(`Zappfy webhook config failed: ${err.message}`),
+      );
+    }
+
+    if (dto.type === ChannelType.WHATSAPP_UAZAPI) {
+      this.configureUazapiWebhook(channel.id).catch((err) =>
+        this.logger.warn(`Uazapi webhook config failed: ${err.message}`),
       );
     }
 
@@ -160,6 +168,19 @@ export class ChannelsService {
     const webhookUrl = `${appUrl}/api/v1/webhooks/WHATSAPP_ZAPPFY`;
     await this.zappfyHttpClient.configureWebhook(channel, webhookUrl);
     this.logger.log(`Zappfy webhook configured: ${webhookUrl}`);
+  }
+
+  private async configureUazapiWebhook(channelId: string): Promise<void> {
+    const channel = await this.repository.findById(channelId);
+    if (!channel) return;
+    const appUrl = process.env.APP_URL;
+    if (!appUrl) {
+      this.logger.warn('APP_URL not set — skipping Uazapi webhook setup');
+      return;
+    }
+    const webhookUrl = `${appUrl}/api/v1/webhooks/WHATSAPP_UAZAPI`;
+    await this.uazapiHttpClient.configureWebhook(channel, webhookUrl);
+    this.logger.log(`Uazapi webhook configured: ${webhookUrl}`);
   }
 
   private async subscribeWaOfficialApp(channelId: string): Promise<void> {
@@ -323,6 +344,24 @@ export class ChannelsService {
       switch (channel.type) {
         case ChannelType.WHATSAPP_ZAPPFY: {
           const status = await this.zappfyHttpClient.getInstanceStatus(channel);
+          const rawState = status?.state;
+          const statusStr =
+            typeof rawState === 'string'
+              ? rawState
+              : typeof rawState === 'object' && rawState?.status
+                ? String(rawState.status)
+                : typeof status?.status === 'string'
+                  ? status.status
+                  : 'connected';
+          return {
+            success: true,
+            status: statusStr,
+            data: status,
+          };
+        }
+
+        case ChannelType.WHATSAPP_UAZAPI: {
+          const status = await this.uazapiHttpClient.getInstanceStatus(channel);
           const rawState = status?.state;
           const statusStr =
             typeof rawState === 'string'
