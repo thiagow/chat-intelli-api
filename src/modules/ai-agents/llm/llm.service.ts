@@ -29,46 +29,69 @@ type OpenAiUsage = {
   [key: string]: unknown;
 };
 
+type LlmProvider = 'sakana' | 'openai';
+
 /**
- * Cliente LLM normalizado para Sakana Fugu/Fugu Ultra.
+ * Cliente LLM normalizado para Sakana Fugu/Fugu Ultra e OpenAI.
  *
  * Mantém o contrato público usado pelo runner, classifier, memória, RAG e
- * evals (`complete()`, `LlmMessage`, `LlmToolDefinition`), mas fala com a
- * API OpenAI-compatible da Sakana. Modelos antigos de Claude/Anthropic são
- * bloqueados explicitamente para garantir que nada volte a usar essa API.
+ * evals (`complete()`, `LlmMessage`, `LlmToolDefinition`), mas fala com duas
+ * APIs Chat Completions OpenAI-compatible por baixo: a da Sakana (prefixo
+ * `sakana/`) e a da OpenAI de verdade (prefixo `openai/`). Modelos antigos de
+ * Claude/Anthropic e Gemini continuam bloqueados explicitamente.
  */
 @Injectable()
 export class LlmService {
   private readonly logger = new Logger(LlmService.name);
-  private readonly client: OpenAI;
-  private readonly hasApiKey: boolean;
+  private readonly sakanaClient: OpenAI;
+  private readonly hasSakanaKey: boolean;
+  private readonly openaiClient: OpenAI;
+  private readonly hasOpenaiKey: boolean;
 
   constructor(config: ConfigService) {
-    const apiKey = config.get<string>('SAKANA_API_KEY');
-    const baseURL =
+    const sakanaApiKey = config.get<string>('SAKANA_API_KEY');
+    const sakanaBaseURL =
       config.get<string>('SAKANA_BASE_URL') ?? SAKANA_DEFAULT_BASE_URL;
-    const timeout = Number(config.get<string>('SAKANA_TIMEOUT_MS') ?? 120_000);
+    const sakanaTimeout = Number(config.get<string>('SAKANA_TIMEOUT_MS') ?? 120_000);
 
-    this.hasApiKey = !!apiKey;
-    if (!apiKey) {
+    this.hasSakanaKey = !!sakanaApiKey;
+    if (!sakanaApiKey) {
       this.logger.warn(
-        'SAKANA_API_KEY not set — AI agents will fail at runtime',
+        'SAKANA_API_KEY not set — agents using sakana/* models will fail at runtime',
       );
     }
 
-    this.client = new OpenAI({
-      apiKey: apiKey ?? 'missing',
-      baseURL,
-      timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 120_000,
+    this.sakanaClient = new OpenAI({
+      apiKey: sakanaApiKey ?? 'missing',
+      baseURL: sakanaBaseURL,
+      timeout: Number.isFinite(sakanaTimeout) && sakanaTimeout > 0 ? sakanaTimeout : 120_000,
+    });
+
+    const openaiApiKey = config.get<string>('OPENAI_API_KEY');
+    this.hasOpenaiKey = !!openaiApiKey;
+    if (!openaiApiKey) {
+      this.logger.warn(
+        'OPENAI_API_KEY not set — agents using openai/* models will fail at runtime',
+      );
+    }
+
+    this.openaiClient = new OpenAI({
+      apiKey: openaiApiKey ?? 'missing',
+      timeout: 120_000,
     });
   }
 
   async complete(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
-    if (!this.hasApiKey) {
-      throw new InternalServerErrorException('SAKANA_API_KEY not set');
+    const { provider, modelId } = this.resolveModel(req.modelId);
+    const client = provider === 'openai' ? this.openaiClient : this.sakanaClient;
+    const hasKey = provider === 'openai' ? this.hasOpenaiKey : this.hasSakanaKey;
+
+    if (!hasKey) {
+      throw new InternalServerErrorException(
+        provider === 'openai' ? 'OPENAI_API_KEY not set' : 'SAKANA_API_KEY not set',
+      );
     }
 
-    const modelId = this.normalizeModelId(req.modelId);
     const messages = this.toOpenAiMessages(req.messages);
     const tools = req.tools
       ? this.toOpenAiTools(this.sanitizeTools(req.tools))
@@ -79,7 +102,7 @@ export class LlmService {
     >;
 
     try {
-      response = await this.client.chat.completions.create({
+      response = await client.chat.completions.create({
         model: modelId,
         messages: messages as any,
         max_tokens: req.maxTokens ?? 2048,
@@ -98,7 +121,7 @@ export class LlmService {
         ...(this.sanitizeModelParams(req.modelParams) as object),
       } as any);
     } catch (err: unknown) {
-      this.handleSakanaError(err, modelId, tools, messages);
+      this.handleLlmError(err, provider, modelId, tools, messages);
 
       // Rede de segurança: 400 com imagem no payload quase sempre é o
       // provider não conseguindo baixar/decodificar a URL (arquivo que
@@ -108,10 +131,10 @@ export class LlmService {
       const stripped = this.stripImageParts(messages);
       if ((err as { status?: number })?.status === 400 && stripped) {
         this.logger.warn(
-          `LLM 400 com imagem no payload — retry sem os image blocks [sakana/${modelId}]`,
+          `LLM 400 com imagem no payload — retry sem os image blocks [${provider}/${modelId}]`,
         );
         try {
-          response = await this.client.chat.completions.create({
+          response = await client.chat.completions.create({
             model: modelId,
             messages: stripped as any,
             max_tokens: req.maxTokens ?? 2048,
@@ -158,32 +181,37 @@ export class LlmService {
   // ─── conversão: nossos tipos → Sakana/OpenAI-compatible ───────────
 
   /**
-   * Internamente salvamos modelos Sakana com prefixo `sakana/` para ficar
-   * explícito no dashboard. A API recebe só o ID real do modelo.
+   * Internamente salvamos modelos com prefixo `sakana/` ou `openai/` pra
+   * ficar explícito no dashboard qual provider está em uso. A API recebe só
+   * o ID real do modelo, sem o prefixo. Anthropic/Google continuam
+   * bloqueados — nenhum cliente pra eles existe neste serviço.
    */
-  private normalizeModelId(id: string): string {
+  private resolveModel(id: string): { provider: LlmProvider; modelId: string } {
     const trimmed = (id ?? '').trim();
     if (!trimmed) {
       throw new BadRequestException('modelId is required');
     }
 
-    if (
-      trimmed.startsWith('anthropic/') ||
-      trimmed.startsWith('claude-') ||
-      trimmed.startsWith('openai/') ||
-      trimmed.startsWith('google/')
-    ) {
+    if (trimmed.startsWith('anthropic/') || trimmed.startsWith('claude-') || trimmed.startsWith('google/')) {
       throw new BadRequestException(
-        `Unsupported LLM model "${trimmed}". This deployment only uses Sakana models. ` +
-          'Migrate agents to sakana/fugu-ultra-20260615 or sakana/fugu.',
+        `Unsupported LLM model "${trimmed}". This deployment only supports Sakana and OpenAI models. ` +
+          'Migrate agents to sakana/fugu-ultra-20260615, sakana/fugu, or an openai/* model.',
       );
     }
 
-    if (trimmed.startsWith('sakana/')) return trimmed.slice('sakana/'.length);
-    if (trimmed === 'fugu' || trimmed.startsWith('fugu-')) return trimmed;
+    if (trimmed.startsWith('openai/')) {
+      return { provider: 'openai', modelId: trimmed.slice('openai/'.length) };
+    }
+
+    if (trimmed.startsWith('sakana/')) {
+      return { provider: 'sakana', modelId: trimmed.slice('sakana/'.length) };
+    }
+    if (trimmed === 'fugu' || trimmed.startsWith('fugu-')) {
+      return { provider: 'sakana', modelId: trimmed };
+    }
 
     throw new BadRequestException(
-      `Unsupported Sakana model "${trimmed}". Use sakana/fugu or sakana/fugu-ultra-20260615.`,
+      `Unsupported LLM model "${trimmed}". Use sakana/fugu, sakana/fugu-ultra-20260615, or an openai/* model.`,
     );
   }
 
@@ -525,8 +553,9 @@ export class LlmService {
 
   // ─── error handling ──────────────────────────────────────────────
 
-  private handleSakanaError(
+  private handleLlmError(
     err: unknown,
+    provider: LlmProvider,
     modelId: string,
     tools: OpenAiTool[] | undefined,
     messages: OpenAiMessage[],
@@ -539,7 +568,7 @@ export class LlmService {
       .filter(Boolean)
       .join(',');
     this.logger.error(
-      `LLM call failed [sakana/${modelId}] status=${status ?? '?'}: ${message} | tools=[${toolNames ?? ''}]`,
+      `LLM call failed [${provider}/${modelId}] status=${status ?? '?'}: ${message} | tools=[${toolNames ?? ''}]`,
     );
     if (status === 400) {
       this.logger.debug(`Messages count: ${messages.length}`);

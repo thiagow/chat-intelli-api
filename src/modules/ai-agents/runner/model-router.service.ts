@@ -61,12 +61,13 @@ export class ModelRouterService {
   selectModel(input: SelectModelInput): string {
     const routing = this.parseRouting(input.modelParams);
 
-    // Sanitiza pra GARANTIR que só modelos Sakana saiam daqui. Agentes
-    // legados podem ter `modelId` antigo (ex.: "claude-sonnet-4-6") que ainda
-    // não foi migrado — nesse caso a síntese cairia no Sakana de conversa em
-    // vez de quebrar no provider. Mesma proteção pra overrides mal preenchidos.
-    const primary = this.toSakana(routing.primary, SAKANA_SIMPLE_MODEL);
-    const escalation = this.toSakana(
+    // Sanitiza pra GARANTIR que só saem modelos suportados (Sakana ou
+    // OpenAI). Agentes legados podem ter `modelId` antigo (ex.:
+    // "claude-sonnet-4-6") que ainda não foi migrado — nesse caso a síntese
+    // cairia no Sakana de conversa em vez de quebrar no provider. Mesma
+    // proteção pra overrides mal preenchidos.
+    const primary = this.sanitizeModel(routing.primary, SAKANA_SIMPLE_MODEL);
+    const escalation = this.sanitizeModel(
       routing.escalation ?? input.modelId,
       SAKANA_CONVERSATION_MODEL,
     );
@@ -84,13 +85,18 @@ export class ModelRouterService {
   }
 
   /**
-   * Garante que o modelo é um ID Sakana válido (sakana/* ou fugu*). Qualquer
-   * coisa fora disso (modelId legado de Claude/Anthropic, override quebrado,
-   * vazio) cai no fallback Sakana informado.
+   * Garante que o modelo é um ID suportado (sakana/*, fugu*, ou openai/*).
+   * Qualquer coisa fora disso (modelId legado de Claude/Anthropic/Google,
+   * override quebrado, vazio) cai no fallback Sakana informado.
    */
-  private toSakana(model: string | undefined | null, fallback: string): string {
+  private sanitizeModel(model: string | undefined | null, fallback: string): string {
     const m = (model ?? '').trim();
-    if (m.startsWith('sakana/') || m === 'fugu' || m.startsWith('fugu-')) {
+    if (
+      m.startsWith('sakana/') ||
+      m === 'fugu' ||
+      m.startsWith('fugu-') ||
+      m.startsWith('openai/')
+    ) {
       return m;
     }
     return fallback;
