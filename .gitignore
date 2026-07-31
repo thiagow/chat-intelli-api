@@ -39,3 +39,5 @@ temp/
 
 # Local file storage
 uploads/
+
+tsconfig.tsbuildinfo
