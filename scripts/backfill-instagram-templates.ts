@@ -4,7 +4,7 @@
  * the same logic as InstagramMessageMapper.extractTemplateContent.
  *
  * Usage:
- *   cd chat-bullq-api
+ *   cd chat-intelli-api
  *   npx ts-node -P tsconfig.json --transpile-only scripts/backfill-instagram-templates.ts
  *   # add `--dry` to preview without writing
  */

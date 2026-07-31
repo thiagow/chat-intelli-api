@@ -4,7 +4,7 @@
  * updating Contact.name + ContactChannel.profileName.
  *
  * Usage:
- *   cd chat-bullq-api
+ *   cd chat-intelli-api
  *   npx ts-node -P tsconfig.json --transpile-only scripts/backfill-instagram-usernames.ts
  */
 import { PrismaClient } from '@prisma/client';
