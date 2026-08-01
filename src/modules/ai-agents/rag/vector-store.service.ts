@@ -62,10 +62,11 @@ export class VectorStoreService {
     await this.prisma.$executeRawUnsafe(
       `
       INSERT INTO ai_vector_entries
-        (id, owner_type, owner_id, conversation_id, agent_id, contact_id, content, embedding, metadata)
+        (id, owner_type, owner_id, organization_id, conversation_id, agent_id, contact_id, content, embedding, metadata)
       VALUES
-        ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9::jsonb)
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10::jsonb)
       ON CONFLICT (id) DO UPDATE SET
+        organization_id = EXCLUDED.organization_id,
         embedding = EXCLUDED.embedding,
         content   = EXCLUDED.content,
         metadata  = EXCLUDED.metadata
@@ -73,6 +74,7 @@ export class VectorStoreService {
       entry.id,
       entry.ownerType,
       entry.ownerId,
+      entry.organizationId,
       entry.conversationId ?? null,
       entry.agentId ?? null,
       entry.contactId ?? null,
@@ -102,6 +104,9 @@ export class VectorStoreService {
    * (0 = identical, 2 = opposite). We convert to similarity via `1 - d`
    * so the score returned to the caller is the familiar 0..1 range
    * (higher = more similar).
+   *
+   * NOTE: organizationId is REQUIRED to prevent cross-tenant leakage.
+   * Throws an error if scope lacks organizationId.
    */
   async search(
     queryVector: number[],
@@ -109,16 +114,37 @@ export class VectorStoreService {
     k = 5,
     minScore = 0.7,
   ): Promise<SearchResult[]> {
+    if (!scope.organizationId) {
+      throw new Error('SearchScope requires organizationId — cross-tenant leakage risk');
+    }
+
     const vec = this.toVectorLiteral(queryVector);
+    // Fetch k * 4 rows, then filter by minScore. This ensures we return K
+    // results instead of K rows that may not meet the threshold.
+    const fetchK = k * 4;
 
     const filters: string[] = [];
-    const params: any[] = [vec, k];
+    const params: any[] = [vec, fetchK];
     let p = 3;
 
-    if (scope.agentId) {
+    // Organization scope is mandatory
+    filters.push(`organization_id = $${p++}`);
+    params.push(scope.organizationId);
+
+    // Agent scope: if agentScope is set, search for this agent's knowledge
+    // and optionally org-wide knowledge (where agentId IS NULL).
+    if (scope.agentScope) {
+      filters.push(
+        `(agent_id = $${p++} OR (agent_id IS NULL AND $${p++}::boolean))`,
+      );
+      params.push(scope.agentScope.agentId);
+      params.push(scope.agentScope.includeOrgWide);
+    } else if (scope.agentId) {
+      // Legacy single agentId filter (non-knowledge search)
       filters.push(`agent_id = $${p++}`);
       params.push(scope.agentId);
     }
+
     if (scope.contactId) {
       filters.push(`contact_id = $${p++}`);
       params.push(scope.contactId);
@@ -140,6 +166,7 @@ export class VectorStoreService {
         id,
         owner_type,
         owner_id,
+        organization_id,
         conversation_id,
         agent_id,
         contact_id,
@@ -157,11 +184,13 @@ export class VectorStoreService {
 
     return rows
       .filter((r) => Number(r.score) >= minScore)
+      .slice(0, k)
       .map((r) => ({
         entry: {
           id: r.id,
           ownerType: r.owner_type,
           ownerId: r.owner_id,
+          organizationId: r.organization_id,
           conversationId: r.conversation_id ?? undefined,
           agentId: r.agent_id ?? undefined,
           contactId: r.contact_id ?? undefined,

@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { EmbeddingsService } from './embeddings.service';
 import { RerankerService } from './reranker.service';
 import { VectorStoreService } from './vector-store.service';
-import { DEFAULT_RAG_CONFIG, type SearchQuery, type SearchResult } from './types';
+import { DEFAULT_RAG_CONFIG, type SearchQuery, type SearchResult, type SearchScope } from './types';
 
 /**
  * High-level RAG entry point — what the prompt composer (Layer 4 CONTEXT)
@@ -44,5 +44,54 @@ export class RetrievalService {
     );
 
     return results;
+  }
+
+  /**
+   * Retrieve from multiple scopes with a single embedding call.
+   *
+   * Useful for searching both conversation history and knowledge base
+   * without doubling the embedding cost.
+   *
+   * @param query Search query text
+   * @param scopes Array of SearchScope objects to search
+   * @param k Results per scope
+   * @param minScore Minimum similarity threshold
+   * @returns Object mapping scope to results array
+   *
+   * Example:
+   *   const results = await retrieval.retrieveMulti(
+   *     "política de garantia",
+   *     [
+   *       { organizationId, agentId, ownerType: 'any' },
+   *       { organizationId, ownerType: 'knowledge', agentScope: { agentId, includeOrgWide: true } }
+   *     ]
+   *   );
+   *   results[0] // history results
+   *   results[1] // knowledge results
+   */
+  async retrieveMulti(
+    query: string,
+    scopes: SearchScope[],
+    k = 5,
+    minScore = 0.7,
+  ): Promise<SearchResult[][]> {
+    const t0 = Date.now();
+
+    // Single embedding call
+    const emb = await this.embeddings.embed(query);
+
+    // Parallel searches across all scopes
+    const resultArrays = await Promise.all(
+      scopes.map((scope) =>
+        this.store.search(emb.vector, scope, k, minScore),
+      ),
+    );
+
+    this.logger.log(
+      `retrieve_multi scopes=${scopes.length} k=${k} minScore=${minScore} ` +
+        `hits=[${resultArrays.map((r) => r.length).join(',')}] durationMs=${Date.now() - t0}`,
+    );
+
+    return resultArrays;
   }
 }

@@ -252,6 +252,7 @@ export class AiAgentRunnerService {
     await this.augmentSystemPromptWithLayers(
       messages,
       organization,
+      conversation.organizationId,
       agent.id,
       conversation.contactId,
       conversation.id,
@@ -970,6 +971,7 @@ export class AiAgentRunnerService {
   private async augmentSystemPromptWithLayers(
     messages: LlmMessage[],
     organization: { aiSecurityRules: unknown },
+    organizationId: string,
     agentId: string,
     contactId: string,
     conversationId: string,
@@ -991,30 +993,68 @@ export class AiAgentRunnerService {
     };
 
     // 2) RAG retrieval (não cacheable — varia por turno)
+    // Busca dupla com embedding único: histórico + conhecimento
     let ragPart: { type: 'text'; text: string; cache: false } | null = null;
     if (triggerText && triggerText.length >= 10) {
       try {
-        const results = await this.retrieval.retrieve({
-          query: triggerText,
-          scope: {
-            agentId,
-            contactId,
-            conversationId,
-            ownerType: 'any',
-          },
-          k: 5,
-          minScore: 0.7,
-        });
-        if (results.length > 0) {
-          const lines = results
+        const [historyResults, knowledgeResults] = await this.retrieval.retrieveMulti(
+          triggerText,
+          [
+            // Histórico (conversa + facts + memória)
+            {
+              organizationId,
+              agentId,
+              contactId,
+              conversationId,
+              ownerType: 'any',
+            },
+            // Base de conhecimento (documentos da org ou agente)
+            {
+              organizationId,
+              ownerType: 'knowledge',
+              agentScope: {
+                agentId,
+                includeOrgWide: true, // Inclui org-wide + agente
+              },
+            },
+          ],
+          5,
+          0.7,
+        );
+
+        const sections: string[] = [];
+
+        if (historyResults.length > 0) {
+          const lines = historyResults
             .map(
               (r, i) =>
                 `${i + 1}. [${r.entry.ownerType}, score=${r.score.toFixed(2)}] ${r.entry.content.slice(0, 240)}`,
             )
             .join('\n');
+          sections.push(
+            `═══ Trechos relevantes do histórico (RAG) ═══\n${lines}`,
+          );
+        }
+
+        if (knowledgeResults.length > 0) {
+          const lines = knowledgeResults
+            .map(
+              (r, i) =>
+                `${i + 1}. [score=${r.score.toFixed(2)}] ${r.entry.content.slice(0, 240)}`,
+            )
+            .join('\n');
+          sections.push(
+            `═══ Base de conhecimento ═══\n${lines}`,
+          );
+        }
+
+        if (sections.length > 0) {
           ragPart = {
             type: 'text',
-            text: `═══ Trechos relevantes do histórico (RAG) ═══\n${lines}\n\nUse esses trechos como memória de longo prazo. NÃO os cite literalmente — apenas demonstre que lembra do contexto.`,
+            text: sections.join(
+              '\n\nUse esses trechos como memória de longo prazo. NÃO os cite literalmente — apenas demonstre que lembra do contexto.\n\n',
+            ) +
+              '\n\nUse esses trechos como memória de longo prazo. NÃO os cite literalmente — apenas demonstre que lembra do contexto.',
             cache: false,
           };
         }

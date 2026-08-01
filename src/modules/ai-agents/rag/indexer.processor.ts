@@ -88,6 +88,7 @@ export class RagIndexerProcessor extends WorkerHost {
       id: `${ownerType}:${ownerId}`,
       ownerType,
       ownerId,
+      organizationId: scope.organizationId,
       conversationId: scope?.conversationId,
       agentId: scope?.agentId,
       contactId: scope?.contactId,

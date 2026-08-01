@@ -180,6 +180,36 @@ model Organization {
   /// null = usa defaults do código (15, 15, 60, 3).
   watchdogConfig        Json?   @map("watchdog_config")
 
+  // ─── Dados cadastrais da empresa ────────────────
+  /// Razão social (ex: "Acme Corp LTDA")
+  legalName String? @map("legal_name")
+  /// Nome comercial (ex: "Acme")
+  tradeName String? @map("trade_name")
+  /// CNPJ
+  document String?
+  /// Email de contato da empresa
+  email String?
+  /// Telefone de contato
+  phone String?
+  /// Site/URL da empresa
+  website String?
+  /// Endereço: CEP
+  addressZip String? @map("address_zip")
+  /// Endereço: rua
+  addressStreet String? @map("address_street")
+  /// Endereço: número
+  addressNumber String? @map("address_number")
+  /// Endereço: complemento
+  addressComplement String? @map("address_complement")
+  /// Endereço: bairro
+  addressDistrict String? @map("address_district")
+  /// Endereço: cidade
+  addressCity String? @map("address_city")
+  /// Endereço: estado
+  addressState String? @map("address_state")
+  /// Endereço: país
+  addressCountry String? @map("address_country")
+
   members       UserOrganization[]
   channels      Channel[]
   contacts      Contact[]
@@ -200,6 +230,7 @@ model Organization {
   products      Product[]
   segments      Segment[]
   projects      Project[]
+  knowledgeSources KnowledgeSource[]
 
   @@map("organizations")
 }
@@ -988,6 +1019,7 @@ model AiAgent {
   pendingActions AiPendingAction[]
   activeOn       Conversation[]    @relation("ActiveAgent")
   skills         AiAgentSkill[]
+  knowledgeSources KnowledgeSource[]
 
   @@index([organizationId], name: "idx_ai_agent_org")
   @@index([organizationId, kind], name: "idx_ai_agent_org_kind")
@@ -1580,6 +1612,20 @@ enum OutboxEventStatus {
   DLQ // jogado pro dead letter queue
 }
 
+// ─── Knowledge Base (RAG) ────────────────────────
+
+enum SourceType {
+  TEXT
+  PDF
+}
+
+enum KnowledgeStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
 // Append-only log de eventos de domínio. Escrito na MESMA transação que a
 // mutação que originou o evento, garantindo "exactly published once or
 // never". O poller é o único que muta `status`/`processedAt`. Nunca delete
@@ -1701,4 +1747,51 @@ model AutomationRun {
   @@index([traceId], name: "idx_run_trace")
   @@index([status, startedAt(sort: Desc)], name: "idx_run_status_time")
   @@map("automation_runs")
+}
+
+// ─── Knowledge Base (RAG) ────────────────────────
+
+model KnowledgeSource {
+  id String @id @default(cuid())
+
+  organizationId String @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// null = documento da organização (vale para todos os agentes)
+  agentId String? @map("agent_id")
+  agent   AiAgent? @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  /// Título dado pelo usuário
+  title String
+
+  /// Tipo: TEXT (texto colado) ou PDF (arquivo)
+  sourceType SourceType @map("source_type")
+
+  /// Conteúdo original (TEXT) ou texto extraído (PDF)
+  content String @db.Text
+
+  /// URL do arquivo PDF (se aplicável)
+  fileUrl String? @map("file_url")
+  /// Nome original do arquivo PDF
+  fileName String? @map("file_name")
+  /// Tamanho do arquivo em bytes
+  fileSize Int? @map("file_size")
+
+  /// Status da ingestão/processamento
+  status KnowledgeStatus @default(PENDING)
+
+  /// Mensagem de erro (se status = FAILED)
+  errorMessage String? @map("error_message")
+
+  /// Número de chunks criados após processamento
+  chunkCount Int? @map("chunk_count")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@index([organizationId], name: "idx_knowledge_org")
+  @@index([agentId], name: "idx_knowledge_agent")
+  @@index([status], name: "idx_knowledge_status")
+  @@index([organizationId, agentId], name: "idx_knowledge_org_agent")
+  @@map("knowledge_sources")
 }

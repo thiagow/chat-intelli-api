@@ -122,6 +122,106 @@ export class UpdateOrganizationDto {
   @ValidateIf((_, value) => value !== null)
   @IsObject()
   watchdogConfig?: WatchdogConfigDto | null;
+
+  // ─── Company info (registration-only, not used in agent prompts) ─
+
+  @ApiPropertyOptional({ example: 'Acme Corp LTDA', description: 'Legal company name' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  legalName?: string | null;
+
+  @ApiPropertyOptional({ example: 'Acme', description: 'Trade/common name' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  tradeName?: string | null;
+
+  @ApiPropertyOptional({ example: '12.345.678/0001-90', description: 'CNPJ' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(20)
+  document?: string | null;
+
+  @ApiPropertyOptional({ description: 'Contact email' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  email?: string | null;
+
+  @ApiPropertyOptional({ example: '+55 11 99999-9999', description: 'Phone' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(20)
+  phone?: string | null;
+
+  @ApiPropertyOptional({ example: 'https://example.com', description: 'Company website' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  website?: string | null;
+
+  @ApiPropertyOptional({ description: 'Address: zip code' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(20)
+  addressZip?: string | null;
+
+  @ApiPropertyOptional({ description: 'Address: street' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  addressStreet?: string | null;
+
+  @ApiPropertyOptional({ description: 'Address: number' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(20)
+  addressNumber?: string | null;
+
+  @ApiPropertyOptional({ description: 'Address: complement' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  addressComplement?: string | null;
+
+  @ApiPropertyOptional({ description: 'Address: district' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  addressDistrict?: string | null;
+
+  @ApiPropertyOptional({ description: 'Address: city' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  addressCity?: string | null;
+
+  @ApiPropertyOptional({ description: 'Address: state' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(2)
+  addressState?: string | null;
+
+  @ApiPropertyOptional({ description: 'Address: country' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  addressCountry?: string | null;
 }
 
 export interface WatchdogConfigDto {

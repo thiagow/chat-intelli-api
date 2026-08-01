@@ -28,6 +28,7 @@ import { LongTermMemoryModule } from './memory/long-term/long-term.module';
 import { ConfirmationsModule } from './confirmations/confirmations.module';
 import { ConfirmationExecutorModule } from './confirmations/confirmation-executor.module';
 import { RagModule } from './rag/rag.module';
+import { KnowledgeModule } from './knowledge/knowledge.module';
 import { EvalsModule } from './evals/evals.module';
 
 @Module({
@@ -46,6 +47,7 @@ import { EvalsModule } from './evals/evals.module';
     ConfirmationsModule,
     ConfirmationExecutorModule,
     RagModule,
+    KnowledgeModule,
     EvalsModule,
     StorageModule,
   ],

@@ -8,25 +8,29 @@ import { VectorStoreService } from './vector-store.service';
 import { RetrievalService } from './retrieval.service';
 import { RerankerService } from './reranker.service';
 import { RagIndexerProcessor } from './indexer.processor';
+import { PdfExtractorService } from './pdf-extractor';
+import { KnowledgeIndexerProcessor } from './knowledge-indexer.processor';
 
 /**
  * RAG (Retrieval-Augmented Generation) module.
  *
  * Wires up:
- *  - `EmbeddingsService`     OpenAI embeddings (text-embedding-3-small)
- *  - `VectorStoreService`    Postgres + pgvector raw SQL via Prisma
- *  - `RetrievalService`      embed → search → optional rerank
- *  - `RerankerService`       Fugu-based relevance re-ranker (optional)
- *  - `RagIndexerProcessor`   BullMQ worker on `rag-indexer` queue
+ *  - `EmbeddingsService`           OpenAI embeddings (text-embedding-3-small)
+ *  - `VectorStoreService`          Postgres + pgvector raw SQL via Prisma
+ *  - `RetrievalService`            embed → search → optional rerank
+ *  - `RerankerService`             Fugu-based relevance re-ranker (optional)
+ *  - `PdfExtractorService`         PDF text extraction (unpdf)
+ *  - `RagIndexerProcessor`         BullMQ worker on `rag-indexer` queue (messages/facts)
+ *  - `KnowledgeIndexerProcessor`   BullMQ worker on `knowledge-indexer` queue (documents)
  *
- * NOTE: the `ai_vector_entries` table + pgvector extension are NOT in
- * `prisma.schema` — they need to be created via a manual migration in
- * Phase 2. See the SQL block at the top of `vector-store.service.ts`.
+ * NOTE: the `ai_vector_entries` table + pgvector extension are created
+ * via migration. The `knowledge_sources` table is modeled in prisma.schema.
  *
  * Exports the high-level services so the agent runner / prompt composer
  * can call `RetrievalService.retrieve(...)` from Layer 4 CONTEXT.
  */
 const ragIndexerQueue = BullModule.registerQueue({ name: 'rag-indexer' });
+const knowledgeIndexerQueue = BullModule.registerQueue({ name: 'knowledge-indexer' });
 
 @Module({
   imports: [
@@ -34,22 +38,27 @@ const ragIndexerQueue = BullModule.registerQueue({ name: 'rag-indexer' });
     PrismaModule,
     LlmModule,
     ragIndexerQueue,
+    knowledgeIndexerQueue,
   ],
   providers: [
     EmbeddingsService,
     VectorStoreService,
     RerankerService,
     RetrievalService,
+    PdfExtractorService,
     RagIndexerProcessor,
+    KnowledgeIndexerProcessor,
   ],
   exports: [
     EmbeddingsService,
     VectorStoreService,
     RetrievalService,
     RerankerService,
-    // Re-exporta a registração da queue pra que módulos que importam RagModule
-    // (ex: AiAgentsModule) consigam @InjectQueue('rag-indexer').
+    PdfExtractorService,
+    // Re-export queue registrations so modules that import RagModule
+    // (ex: AiAgentsModule, KnowledgeModule) can @InjectQueue(...).
     ragIndexerQueue,
+    knowledgeIndexerQueue,
   ],
 })
 export class RagModule {}
