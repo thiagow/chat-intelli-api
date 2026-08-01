@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { LlmService } from '../llm/llm.service';
 import { LlmMessage } from '../llm/llm.types';
-import { SAKANA_SIMPLE_MODEL } from '../llm/llm.constants';
+import { AuxModelService } from '../llm/aux-model.service';
 import {
   CLASSIFIER_SYSTEM_PROMPT,
   buildClassifierUserPrompt,
@@ -34,12 +34,12 @@ import { IntentRouterService } from './intent-router.service';
 @Injectable()
 export class IntentClassifierService {
   private readonly logger = new Logger(IntentClassifierService.name);
-  private readonly DEFAULT_MODEL = SAKANA_SIMPLE_MODEL;
   private readonly DEFAULT_THRESHOLD = 0.85;
 
   constructor(
     private readonly llm: LlmService,
     private readonly intentRouter: IntentRouterService,
+    private readonly auxModel: AuxModelService,
   ) {}
 
   async classify(
@@ -48,7 +48,7 @@ export class IntentClassifierService {
     config?: Partial<ClassifierConfig>,
   ): Promise<ClassificationResult> {
     const t0 = Date.now();
-    const model = config?.model ?? this.DEFAULT_MODEL;
+    const model = config?.model ?? this.auxModel.simpleModel;
     const threshold = config?.threshold ?? this.DEFAULT_THRESHOLD;
 
     const messages: LlmMessage[] = [

@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { LlmService } from '../llm/llm.service';
+import { AuxModelService } from '../llm/aux-model.service';
 import type { LlmMessage } from '../llm/llm.types';
-import { DEFAULT_RAG_CONFIG, type SearchResult } from './types';
+import { type SearchResult } from './types';
 
 /**
  * Optional second pass after vector search. The vector store gives us
@@ -17,9 +18,10 @@ import { DEFAULT_RAG_CONFIG, type SearchResult } from './types';
 @Injectable()
 export class RerankerService {
   private readonly logger = new Logger(RerankerService.name);
-  private readonly RERANKER_MODEL = DEFAULT_RAG_CONFIG.rerankerModel;
-
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    private readonly auxModel: AuxModelService,
+  ) {}
 
   /**
    * Re-orders `candidates` by relevance to `query`. Returns the same
@@ -51,7 +53,7 @@ export class RerankerService {
 
     try {
       const response = await this.llm.complete({
-        modelId: this.RERANKER_MODEL,
+        modelId: this.auxModel.simpleModel,
         messages,
         temperature: 0,
         maxTokens: 256,

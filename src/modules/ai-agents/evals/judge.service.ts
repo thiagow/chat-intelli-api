@@ -1,9 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { LlmService } from '../llm/llm.service';
-import { SAKANA_SIMPLE_MODEL } from '../llm/llm.constants';
+import { AuxModelService } from '../llm/aux-model.service';
 import { JudgeVerdict } from './types';
-
-const JUDGE_MODEL = SAKANA_SIMPLE_MODEL;
 
 const JUDGE_SYSTEM_PROMPT = `Você é um juiz imparcial que avalia respostas de agents de IA.
 
@@ -20,13 +18,17 @@ Não inclua nenhum outro texto antes ou depois do JSON.`;
 
 /**
  * LLM-as-judge para asserções subjetivas em evals (tom, clareza, empatia,
- * aderência a um padrão de copy). Usa Sakana Fugu — é barato, rápido e suficiente pro nível de avaliação binária pass/fail.
+ * aderência a um padrão de copy). Usa o modelo barato do provedor auxiliar —
+ * é suficiente pro nível de avaliação binária pass/fail.
  */
 @Injectable()
 export class JudgeService {
   private readonly logger = new Logger(JudgeService.name);
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    private readonly auxModel: AuxModelService,
+  ) {}
 
   /**
    * Pergunta ao juiz se a resposta do agent satisfaz o critério passado.
@@ -47,7 +49,7 @@ export class JudgeService {
 
     try {
       const completion = await this.llm.complete({
-        modelId: JUDGE_MODEL,
+        modelId: this.auxModel.simpleModel,
         temperature: 0,
         maxTokens: 256,
         messages: [

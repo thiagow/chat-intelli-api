@@ -77,10 +77,12 @@ export interface RagConfig {
   k: number;
   /** Default minimum cosine similarity. */
   minScore: number;
-  /** Whether to run the cheap Fugu reranker after vector search. */
+  /**
+   * Whether to run the cheap reranker after vector search. O modelo usado
+   * vem do `AuxModelService` (segue o provedor auxiliar do deploy), não de
+   * config — por isso não há `rerankerModel` aqui.
+   */
   rerankEnabled: boolean;
-  /** Model id for the reranker (Sakana format, e.g. `sakana/fugu`). */
-  rerankerModel: string;
 }
 
 /** Job payload for the BullMQ `rag-indexer` queue. */
@@ -116,5 +118,4 @@ export const DEFAULT_RAG_CONFIG: RagConfig = {
   k: 5,
   minScore: 0.7,
   rerankEnabled: false,
-  rerankerModel: 'sakana/fugu',
 };

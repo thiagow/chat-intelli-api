@@ -1,9 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 
-import {
-  SAKANA_CONVERSATION_MODEL,
-  SAKANA_SIMPLE_MODEL,
-} from '../llm/llm.constants';
+import { defaultModelsFor, providerOf } from '../llm/llm.constants';
 
 /**
  * Fase da chamada LLM dentro de um turno do agente.
@@ -36,7 +33,10 @@ interface RoutingOverride {
 
 export interface SelectModelInput {
   agentKind: AgentKind;
-  /** `AiAgent.modelId` — usado como modelo de escalonamento default. */
+  /**
+   * `AiAgent.modelId` — modelo de escalonamento default E fonte do provedor
+   * que define o par de modelos (barato/conversa) usado no turno todo.
+   */
   modelId: string;
   /** `AiAgent.modelParams` cru do banco. */
   modelParams?: Record<string, unknown> | null;
@@ -44,15 +44,23 @@ export interface SelectModelInput {
 }
 
 /**
- * Decide qual modelo Sakana usar em cada chamada do loop do agente.
+ * Decide qual modelo usar em cada chamada do loop do agente.
  *
- * Estratégia (objetivo: usar mais o fugu, ultra só quando necessário):
- *  - Toda iteração de ferramenta roda no `fugu` (barato, baixa latência).
+ * Estratégia (objetivo: usar o modelo barato sempre que possível, escalando
+ * só quando a qualidade importa):
+ *  - Toda iteração de ferramenta roda no modelo barato do provedor.
  *  - A síntese final:
- *      • WORKER (especialista de vendas/suporte/impl) → escala pro `fugu-ultra`
- *        (é a resposta que o cliente lê; qualidade importa).
- *      • ORCHESTRATOR (Augusto, triagem/small-talk/ambíguo) → fica no `fugu`.
+ *      • WORKER (especialista de vendas/suporte/impl) → escala pro modelo de
+ *        conversa (é a resposta que o cliente lê; qualidade importa).
+ *      • ORCHESTRATOR (Augusto, triagem/small-talk/ambíguo) → fica no barato.
  *  - Qualquer agente pode sobrescrever via `modelParams.routing`.
+ *
+ * O PAR de modelos (barato/conversa) é derivado do provedor do próprio
+ * agente: um agente `openai/*` roda ferramentas no gpt-4o-mini, um agente
+ * `sakana/*` roda no fugu. Antes o barato era fixo em Sakana, o que fazia
+ * TODO agente OpenAI quebrar na primeira iteração com "SAKANA_API_KEY not
+ * set" — o modelId do agente só alimentava o escalation, e a fase `tool`
+ * nunca chega lá.
  */
 @Injectable()
 export class ModelRouterService {
@@ -60,16 +68,17 @@ export class ModelRouterService {
 
   selectModel(input: SelectModelInput): string {
     const routing = this.parseRouting(input.modelParams);
+    const defaults = defaultModelsFor(providerOf(input.modelId));
 
     // Sanitiza pra GARANTIR que só saem modelos suportados (Sakana ou
     // OpenAI). Agentes legados podem ter `modelId` antigo (ex.:
-    // "claude-sonnet-4-6") que ainda não foi migrado — nesse caso a síntese
-    // cairia no Sakana de conversa em vez de quebrar no provider. Mesma
-    // proteção pra overrides mal preenchidos.
-    const primary = this.sanitizeModel(routing.primary, SAKANA_SIMPLE_MODEL);
+    // "claude-sonnet-4-6") que ainda não foi migrado — nesse caso
+    // `providerOf` devolve 'sakana' e os defaults abaixo mantêm o
+    // comportamento antigo em vez de quebrar no provider.
+    const primary = this.sanitizeModel(routing.primary, defaults.simple);
     const escalation = this.sanitizeModel(
       routing.escalation ?? input.modelId,
-      SAKANA_CONVERSATION_MODEL,
+      defaults.conversation,
     );
 
     if (routing.alwaysPrimary) return primary;
@@ -87,7 +96,7 @@ export class ModelRouterService {
   /**
    * Garante que o modelo é um ID suportado (sakana/*, fugu*, ou openai/*).
    * Qualquer coisa fora disso (modelId legado de Claude/Anthropic/Google,
-   * override quebrado, vazio) cai no fallback Sakana informado.
+   * override quebrado, vazio) cai no fallback informado pelo caller.
    */
   private sanitizeModel(model: string | undefined | null, fallback: string): string {
     const m = (model ?? '').trim();

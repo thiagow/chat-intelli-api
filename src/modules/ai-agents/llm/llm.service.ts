@@ -168,7 +168,11 @@ export class LlmService {
 
     const message = this.fromOpenAiMessage(choice.message as any);
     const stopReason = this.normalizeStopReason(choice.finish_reason);
-    const usage = this.extractUsage(response.usage as OpenAiUsage | undefined, modelId);
+    const usage = this.extractUsage(
+      response.usage as OpenAiUsage | undefined,
+      provider,
+      modelId,
+    );
 
     return {
       message,
@@ -486,6 +490,7 @@ export class LlmService {
 
   private extractUsage(
     usage: OpenAiUsage | undefined,
+    provider: LlmProvider,
     modelId: string,
   ): LlmUsage {
     const input = usage?.prompt_tokens ?? 0;
@@ -493,7 +498,8 @@ export class LlmService {
     const cacheRead = usage?.prompt_tokens_details?.cached_tokens ?? 0;
     const explicitCost = this.findExplicitCost(usage);
     const costUsd =
-      explicitCost ?? this.calculateCost(modelId, { input, output, cacheRead });
+      explicitCost ??
+      this.calculateCost(provider, modelId, { input, output, cacheRead });
 
     if (modelId === 'fugu' && explicitCost == null) {
       this.logger.debug(
@@ -526,29 +532,54 @@ export class LlmService {
   }
 
   /**
-   * Fugu Ultra tem preço fixo público. Fugu simples pode rotear modelos
-   * diferentes; quando a API não retorna custo, mantemos 0 para não inventar.
+   * Custo em USD a partir dos tokens. Preços em USD por milhão de tokens.
+   *
+   * A OpenAI não devolve custo no `usage` (só tokens), então sem esta tabela
+   * TODO run OpenAI gravaria `costUsd: 0` — e o teto mensal de custo da org
+   * nunca dispararia. Sakana devolve custo explícito em alguns modelos
+   * (tratado antes daqui, em `findExplicitCost`); Fugu Ultra tem preço
+   * público fixo. Modelo desconhecido → 0, pra não inventar número.
    */
   private calculateCost(
+    provider: LlmProvider,
     modelId: string,
     tokens: { input: number; output: number; cacheRead: number },
   ): number {
-    if (modelId !== 'fugu-ultra-20260615' && modelId !== 'fugu-ultra') {
-      return 0;
-    }
+    const pricing = this.pricingFor(provider, modelId, tokens.input);
+    if (!pricing) return 0;
 
     const uncachedInput = Math.max(0, tokens.input - tokens.cacheRead);
-    const longContext = tokens.input > 272_000;
-    const pricing = longContext
-      ? { input: 10, output: 45, cacheRead: 1 }
-      : { input: 5, output: 30, cacheRead: 0.5 };
-
     return (
       (uncachedInput * pricing.input +
         tokens.output * pricing.output +
         tokens.cacheRead * pricing.cacheRead) /
       1_000_000
     );
+  }
+
+  private pricingFor(
+    provider: LlmProvider,
+    modelId: string,
+    inputTokens: number,
+  ): { input: number; output: number; cacheRead: number } | null {
+    if (provider === 'sakana') {
+      if (modelId !== 'fugu-ultra-20260615' && modelId !== 'fugu-ultra') {
+        return null;
+      }
+      // Fugu Ultra cobra mais acima de 272k tokens de contexto.
+      return inputTokens > 272_000
+        ? { input: 10, output: 45, cacheRead: 1 }
+        : { input: 5, output: 30, cacheRead: 0.5 };
+    }
+
+    // OpenAI: cached input custa metade do input normal.
+    if (modelId.startsWith('gpt-4o-mini')) {
+      return { input: 0.15, output: 0.6, cacheRead: 0.075 };
+    }
+    if (modelId.startsWith('gpt-4o')) {
+      return { input: 2.5, output: 10, cacheRead: 1.25 };
+    }
+    return null;
   }
 
   // ─── error handling ──────────────────────────────────────────────

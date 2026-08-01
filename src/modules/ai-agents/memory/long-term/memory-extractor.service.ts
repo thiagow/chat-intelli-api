@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { LlmService } from '../../llm/llm.service';
-import { SAKANA_SIMPLE_MODEL } from '../../llm/llm.constants';
+import { AuxModelService } from '../../llm/aux-model.service';
 import {
   ExtractionInput,
   ExtractionResult,
@@ -20,9 +20,10 @@ import {
 @Injectable()
 export class MemoryExtractorService {
   private readonly logger = new Logger(MemoryExtractorService.name);
-  private readonly modelId = SAKANA_SIMPLE_MODEL;
-
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    private readonly auxModel: AuxModelService,
+  ) {}
 
   async extract(input: ExtractionInput): Promise<ExtractionResult> {
     const systemPrompt = this.buildSystemPrompt();
@@ -31,7 +32,7 @@ export class MemoryExtractorService {
     let response;
     try {
       response = await this.llm.complete({
-        modelId: this.modelId,
+        modelId: this.auxModel.simpleModel,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
