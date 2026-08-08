@@ -47,7 +47,11 @@ export class MediaResolverService {
 
     const content = (message.content ?? {}) as Record<string, any>;
 
-    if (typeof content.mediaUrl === 'string' && content.mediaUrl) {
+    if (
+      typeof content.mediaUrl === 'string' &&
+      content.mediaUrl &&
+      !this.looksUnplayableMedia(content.mediaUrl)
+    ) {
       return { url: content.mediaUrl, mimeType: content.mimeType };
     }
 
@@ -86,5 +90,15 @@ export class MediaResolverService {
     });
 
     return { url: fileUrl, mimeType: mimeType || content.mimeType };
+  }
+
+  /**
+   * URL de mídia que o browser não toca: `.enc` da CDN da Meta. Mesma regra
+   * usada em `messages.service.ts` (`looksUnplayableMedia`) e no front
+   * (`use-resolved-media.ts`) — precisa forçar resolução pelo provider mesmo
+   * quando `content.mediaUrl` já está preenchido.
+   */
+  private looksUnplayableMedia(url: string): boolean {
+    return /\.enc(\?|$)/i.test(url) || /mmg\.whatsapp\.net/i.test(url);
   }
 }

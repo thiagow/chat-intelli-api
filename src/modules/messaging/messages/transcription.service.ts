@@ -152,7 +152,8 @@ export class TranscriptionService {
     let mediaUrl: string | undefined = content.mediaUrl;
     let mimeType: string | undefined = content.mimeType;
 
-    if (!mediaUrl && !mediaId) {
+    const mediaUrlUnusable = !mediaUrl || this.looksUnplayableMedia(mediaUrl);
+    if (mediaUrlUnusable && !mediaId) {
       // Resolver will hit the provider (Uazapi's /message/download etc.),
       // cache the URL on content.mediaUrl, and return it. Subsequent calls
       // skip the provider roundtrip.
@@ -167,7 +168,7 @@ export class TranscriptionService {
     const adapter = this.adapterRegistry.getOutbound(channel.type);
 
     let buffer: Buffer;
-    if (mediaId && !mediaUrl) {
+    if (mediaId && mediaUrlUnusable) {
       buffer = await adapter.downloadMedia(channel, mediaId);
     } else {
       try {
@@ -183,6 +184,16 @@ export class TranscriptionService {
 
     const filename = this.filenameFor(mimeType);
     return { buffer, mimeType, filename };
+  }
+
+  /**
+   * URL de mídia que o browser/CDN público não serve: `.enc` da CDN da Meta.
+   * Mesma regra do `MediaResolverService` — precisa forçar o resolve pelo
+   * provider mesmo quando `content.mediaUrl` já está preenchido, senão o
+   * Whisper recebe bytes criptografados e a transcrição falha em silêncio.
+   */
+  private looksUnplayableMedia(url: string): boolean {
+    return /\.enc(\?|$)/i.test(url) || /mmg\.whatsapp\.net/i.test(url);
   }
 
   private filenameFor(mimeType?: string): string {
