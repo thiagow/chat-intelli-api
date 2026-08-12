@@ -1,13 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Conversation, Organization } from '@prisma/client';
 import { PrismaService } from '../../../database/prisma.service';
-import { IntentClassifierService } from '../classifier/intent-classifier.service';
-import { IntentRouterService } from '../classifier/intent-router.service';
-import type {
-  ClassificationResult,
-  ClassifierMessage,
-} from '../classifier/intent.types';
-import { IntentType } from '../classifier/intent.types';
 
 interface BusinessHoursDay {
   enabled: boolean;
@@ -28,38 +21,34 @@ const DAY_KEYS = [
 export interface AgentSelection {
   agentId: string;
   agentName: string;
-  classifiedIntent: string | null;
-  classifierConfidence: number | null;
-  skippedOrchestrator: boolean;
-  classifierCostUsd: number;
 }
 
 @Injectable()
 export class AgentRouterService {
   private readonly logger = new Logger(AgentRouterService.name);
 
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly classifier: IntentClassifierService,
-    private readonly intentRouter: IntentRouterService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   /**
    * Resolve qual agente vai atender essa mensagem.
    *
    * Regras:
    * 1. Se a conversa já tem `activeAgentId` (continuação de conversa em andamento) →
-   *    usa ele direto, sem classificar (evita re-roteamento no meio do papo).
-   * 2. Se for primeira mensagem (sem activeAgentId) → chama IntentClassifier
-   *    (Fugu cheap/simple-model path). Se confidence >= threshold e o intent for
-   *    direcionável, pula o orchestrator e vai direto pro worker.
-   * 3. Fallback: cai no orchestrator AUTONOMOUS do canal (Augusto).
+   *    usa ele direto (evita re-roteamento no meio do papo).
+   * 2. Senão → usa o agente configurado no canal (`AiAgentChannel` em modo
+   *    AUTONOMOUS, orchestrator primeiro). Determinístico: o ponto de entrada
+   *    é o que o operador configurou no painel, sem nenhuma chamada de LLM
+   *    entre receber a mensagem e escolher quem atende.
+   *
+   * Antes existia um passo de pré-classificação por LLM aqui, que tentava
+   * adivinhar o worker direto a partir do texto e pular o orchestrator. Esse
+   * passo foi removido: o mapa intent→agente era hardcoded com nomes de outra
+   * operação, então o lookup por nome nunca casava — 100% do tráfego caía no
+   * orchestrator de qualquer forma, pagando uma chamada de LLM a mais por
+   * mensagem. Quem decide a especialização hoje é o próprio orchestrator, via
+   * listAvailableAgents + delegateToAgent (data-driven, sem deploy).
    */
-  async selectAgent(
-    conversation: Conversation,
-    latestMessageText: string,
-    recentMessages: ClassifierMessage[] = [],
-  ): Promise<AgentSelection | null> {
+  async selectAgent(conversation: Conversation): Promise<AgentSelection | null> {
     // 1. Conversa em andamento — mantém o agent atual
     if (conversation.activeAgentId) {
       const agent = await this.prisma.aiAgent.findUnique({
@@ -70,94 +59,28 @@ export class AgentRouterService {
         return {
           agentId: agent.id,
           agentName: agent.name,
-          classifiedIntent: null,
-          classifierConfidence: null,
-          skippedOrchestrator: false,
-          classifierCostUsd: 0,
         };
       }
     }
 
-    // 2. Carrega threshold da org
-    const org = await this.prisma.organization.findUnique({
-      where: { id: conversation.organizationId },
-      select: { aiClassifierThreshold: true },
-    });
-    const threshold = org?.aiClassifierThreshold
-      ? Number(org.aiClassifierThreshold)
-      : 0.85;
-
-    // 3. Classifica
-    let classification: ClassificationResult;
-    try {
-      classification = await this.classifier.classify(
-        latestMessageText,
-        recentMessages,
-        { threshold },
-      );
-    } catch (err) {
-      this.logger.warn({
-        msg: 'classifier_failed_fallback_orchestrator',
-        error: (err as Error).message,
-      });
-      return this.fallbackToOrchestrator(conversation);
-    }
-
-    // 4. Se confidence alta e intent direcionável → vai direto pro worker
-    if (
-      classification.skippedOrchestrator &&
-      classification.suggestedAgent &&
-      classification.intent !== IntentType.AMBIGUOUS &&
-      classification.intent !== IntentType.SMALL_TALK
-    ) {
-      const agent = await this.prisma.aiAgent.findFirst({
-        where: {
-          organizationId: conversation.organizationId,
-          name: classification.suggestedAgent,
-          isActive: true,
-          deletedAt: null,
-        },
-        select: { id: true, name: true },
-      });
-      if (agent) {
-        this.logger.log({
-          msg: 'agent_selected_via_classifier',
-          intent: classification.intent,
-          confidence: classification.confidence,
-          agentName: agent.name,
-          costUsd: classification.costUsd,
-        });
-        return {
-          agentId: agent.id,
-          agentName: agent.name,
-          classifiedIntent: classification.intent,
-          classifierConfidence: classification.confidence,
-          skippedOrchestrator: true,
-          classifierCostUsd: classification.costUsd,
-        };
-      }
-      this.logger.warn({
-        msg: 'classifier_suggested_agent_not_found',
-        suggested: classification.suggestedAgent,
-      });
-    }
-
-    // 5. Fallback pro orchestrator
-    const fallback = await this.fallbackToOrchestrator(conversation);
-    if (fallback) {
-      fallback.classifiedIntent = classification.intent;
-      fallback.classifierConfidence = classification.confidence;
-      fallback.classifierCostUsd = classification.costUsd;
-    }
-    return fallback;
+    // 2. Agente configurado no canal
+    return this.resolveChannelAgent(conversation);
   }
 
-  private async fallbackToOrchestrator(
+  /**
+   * Agente configurado como ponto de entrada do canal.
+   *
+   * Preferência pelo ORCHESTRATOR: ele é quem sabe delegar pro especialista.
+   * Sem esse filtro o findFirst devolvia um worker arbitrário do canal (visto
+   * em prod: worker de vendas recebendo small talk que era do orchestrator).
+   *
+   * Ordenação por `createdAt` para dar resultado estável quando o canal tem
+   * mais de um agente AUTONOMOUS vinculado — sem isso a escolha variava entre
+   * chamadas, e o operador não tinha como saber quem ia atender.
+   */
+  private async resolveChannelAgent(
     conversation: Conversation,
   ): Promise<AgentSelection | null> {
-    // kind: ORCHESTRATOR é obrigatório — sem esse filtro o findFirst
-    // devolvia um worker arbitrário do canal (visto em prod: Daniel
-    // recebendo small talk/spam/fallback que era do Augusto).
     let link = await this.prisma.aiAgentChannel.findFirst({
       where: {
         channelId: conversation.channelId,
@@ -167,6 +90,7 @@ export class AgentRouterService {
       include: {
         agent: { select: { id: true, name: true } },
       },
+      orderBy: { createdAt: 'asc' },
     });
     if (!link) {
       // Canal sem orquestrador vinculado: melhor um worker qualquer
@@ -180,11 +104,12 @@ export class AgentRouterService {
         include: {
           agent: { select: { id: true, name: true } },
         },
+        orderBy: { createdAt: 'asc' },
       });
     }
     if (!link?.agent) {
       this.logger.warn({
-        msg: 'no_orchestrator_for_channel',
+        msg: 'no_agent_configured_for_channel',
         channelId: conversation.channelId,
       });
       return null;
@@ -192,10 +117,6 @@ export class AgentRouterService {
     return {
       agentId: link.agent.id,
       agentName: link.agent.name,
-      classifiedIntent: null,
-      classifierConfidence: null,
-      skippedOrchestrator: false,
-      classifierCostUsd: 0,
     };
   }
 

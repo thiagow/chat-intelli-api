@@ -22,7 +22,6 @@ import { AiCatalogController } from './catalog/catalog.controller';
 
 // ─── Fase 2 — AI Intelligence Layer ──────────────
 import { PromptsModule } from './prompts/prompts.module';
-import { ClassifierModule } from './classifier/classifier.module';
 import { ShortTermMemoryModule } from './memory/short-term/short-term.module';
 import { LongTermMemoryModule } from './memory/long-term/long-term.module';
 import { ConfirmationsModule } from './confirmations/confirmations.module';
@@ -41,7 +40,6 @@ import { EvalsModule } from './evals/evals.module';
     RealtimeModule,
     forwardRef(() => ChannelHubModule),
     PromptsModule,
-    ClassifierModule,
     ShortTermMemoryModule,
     LongTermMemoryModule,
     ConfirmationsModule,
