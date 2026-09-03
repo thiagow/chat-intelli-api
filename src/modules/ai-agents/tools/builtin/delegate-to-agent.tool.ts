@@ -81,7 +81,7 @@ export class DelegateToAgentTool implements AiTool {
       return { output: { ok: false, error: 'agentId is required' } };
     }
 
-    const target = await this.prisma.aiAgent.findFirst({
+    let target = await this.prisma.aiAgent.findFirst({
       where: {
         id: targetAgentId,
         organizationId: ctx.organizationId,
@@ -91,13 +91,49 @@ export class DelegateToAgentTool implements AiTool {
       select: { id: true, name: true, kind: true },
     });
 
+    // Retry: the model sometimes passes a name (or a slug/guess) instead of
+    // the real cuid, even though the description asks for the exact id from
+    // listAvailableAgents. Rather than fail and force a separate
+    // listAvailableAgents round-trip, resolve by name against the same
+    // WORKER pool that tool exposes. Saves one full tool-call turn.
     if (!target) {
-      return {
-        output: {
-          ok: false,
-          error: `Agent ${targetAgentId} not found in this organization or is inactive`,
+      const workers = await this.prisma.aiAgent.findMany({
+        where: {
+          organizationId: ctx.organizationId,
+          kind: 'WORKER',
+          isActive: true,
+          deletedAt: null,
+          id: { not: ctx.agentId },
         },
-      };
+        select: { id: true, name: true, kind: true },
+      });
+
+      const needle = targetAgentId.toLowerCase();
+      const byExactName = workers.find((w) => w.name.toLowerCase() === needle);
+      const bySubstring = workers.find(
+        (w) =>
+          w.name.toLowerCase().includes(needle) ||
+          needle.includes(w.name.toLowerCase()),
+      );
+      const resolved = byExactName ?? bySubstring;
+
+      if (resolved) {
+        this.logger.warn(
+          `delegateToAgent: agentId "${targetAgentId}" didn't match an id, resolved by name to ${resolved.name} (${resolved.id})`,
+        );
+        target = resolved;
+      } else {
+        return {
+          output: {
+            ok: false,
+            error: `Agent "${targetAgentId}" not found in this organization or is inactive. Use one of the agentId values below (do not guess a name).`,
+            availableAgents: workers.map((w) => ({
+              agentId: w.id,
+              name: w.name,
+            })),
+          },
+        };
+      }
     }
 
     if (target.kind !== 'WORKER') {
