@@ -1,152 +1,163 @@
 # Intelli Chat — API
 
-**Backend da Intelli Chat**, uma plataforma de atendimento omnichannel: mensagens de WhatsApp, Instagram e Gmail chegam, são normalizadas, roteadas para agentes de IA (ou chatbot) e respondidas — com handoff para humano quando necessário. Arquitetura orientada a filas, multi-tenant desde o design, com automações reativas e um subsistema completo de agentes de IA com roteamento de custo, RAG e ferramentas.
+**Backend of Intelli Chat**, an omnichannel customer-service platform: WhatsApp, Instagram, and Gmail messages arrive, get normalized, get routed to AI agents (or a chatbot), and get answered — with human handoff when needed. Queue-driven architecture, multi-tenant by design, with reactive automations and a full AI-agent subsystem featuring cost routing, RAG, and tool use.
 
-Consumido pelo frontend [`chat-intelli-web`](../chat-intelli-web) via REST + Socket.IO e exposto de forma somente-leitura ao [`chat-intelli-mcp`](../chat-intelli-mcp) para integração com Claude.
-
-> Comentários e documentação majoritariamente em português (pt-BR); identificadores de código em inglês.
+Consumed by the [`chat-intelli-web`](../chat-intelli-web) frontend via REST + Socket.IO, and exposed read-only to [`chat-intelli-mcp`](../chat-intelli-mcp) for Claude integration.
 
 ---
 
 ## Stack
 
-| Camada | Tecnologia |
+| Layer | Technology |
 |---|---|
 | Framework | [NestJS 11](https://nestjs.com) |
-| Banco de dados | [PostgreSQL](https://www.postgresql.org) + [Prisma 6](https://www.prisma.io) + [pgvector](https://github.com/pgvector/pgvector) (busca semântica) |
-| Filas | [BullMQ](https://docs.bullmq.io) sobre [Redis](https://redis.io) (`ioredis`) |
-| Tempo real | Socket.IO (`@nestjs/platform-socket.io`) |
-| Auth | JWT (`@nestjs/jwt`) + Passport (estratégia JWT + API key custom) |
-| IA / LLM | OpenAI SDK (compatível com múltiplos provedores) — OpenAI e Sakana |
-| Validação | class-validator + class-transformer |
-| Documentação de API | Swagger (`@nestjs/swagger`), auto-gerado em `/docs` |
-| Storage | Disco local (dev) / Cloudflare R2 (`@aws-sdk/client-s3`, produção) |
-| Segurança | Helmet |
-| Notificações push | `web-push` |
-| Testes | Jest (unitários) |
-| Linguagem | TypeScript (strict) |
+| Database | [PostgreSQL](https://www.postgresql.org) + [Prisma 6](https://www.prisma.io) + [pgvector](https://github.com/pgvector/pgvector) (semantic search) |
+| Queues | [BullMQ](https://docs.bullmq.io) on top of [Redis](https://redis.io) (`ioredis`) |
+| Realtime | Socket.IO (`@nestjs/platform-socket.io`) |
+| Auth | JWT (`@nestjs/jwt`) + Passport (JWT strategy + custom API-key strategy) |
+| AI / LLM | OpenAI SDK (multi-provider compatible) — OpenAI and Sakana |
+| Validation | class-validator + class-transformer |
+| API docs | Swagger (`@nestjs/swagger`), auto-generated at `/docs` |
+| Storage | Local disk (dev) / Cloudflare R2 (`@aws-sdk/client-s3`, production) |
+| Security | Helmet |
+| Push notifications | `web-push` |
+| Testing | Jest (unit) |
+| Language | TypeScript (strict) |
 
 ---
 
-## Funcionalidades
+## Features
 
-### 🔌 Channel Hub — arquitetura de portas e adaptadores
-Cada canal (WhatsApp via Zappfy/UAZAPI, WhatsApp Official API, Instagram, Gmail) é um adaptador autocontido implementando três portas (`InboundChannelPort`, `OutboundChannelPort`, `HistorySyncPort` opcional), registrado em um registry central por `ChannelType`. Adicionar um canal novo não exige tocar em nada a jusante do pipeline de mensagens normalizadas. Gmail é o único canal por polling (cron via BullMQ); os demais recebem webhooks.
+### 🔌 Channel Hub — ports & adapters architecture
+Each channel (WhatsApp via Zappfy/UAZAPI, WhatsApp Official API, Instagram, Gmail) is a self-contained adapter implementing three ports (`InboundChannelPort`, `OutboundChannelPort`, an optional `HistorySyncPort`), registered in a central registry keyed by `ChannelType`. Adding a new channel requires no changes downstream of the normalized message pipeline. Gmail is the only polling-based channel (BullMQ cron); the rest receive webhooks.
 
-### 📨 Pipeline de mensagens assíncrono e idempotente
-Webhook → persistência do payload bruto (fonte de verdade para replay) → fila `inbound-messages` → resolução de contato/conversa → persistência → emissão em tempo real → evento de outbox → execução de agente com debounce (10s) para agrupar rajadas de mensagens do cliente em uma única resposta.
+### 📨 Async, idempotent message pipeline
+Webhook → raw payload persisted (source of truth for replay) → `inbound-messages` queue → contact/conversation resolution → persistence → realtime emission → outbox event → agent run with a 10-second debounce that collapses customer message bursts into a single response.
 
-### 🤖 Agentes de IA — o maior subsistema
-- **Roteamento determinístico** de conversa para agente (sem LLM na decisão): conversa em andamento mantém o agente ativo; caso contrário, o orquestrador autônomo do canal assume, com fallback ao primeiro worker disponível.
-- **Loop de tool-calling** com limites de iteração e profundidade de delegação entre agentes (agent-to-agent), com guardas de comportamento deliberadas (uma única bolha de saída por execução, nudge sintético quando ferramentas rodam sem gerar resposta).
-- **Roteamento de custo por modelo**: iterações de ferramentas sempre usam o modelo mais barato do provedor; apenas a síntese final escala de modelo, e só para agentes worker — o orquestrador permanece barato. Overrides por agente são configuráveis via JSON, sem migração.
-- **RAG com pgvector**: base de conhecimento indexada e consultada via SQL raw, com reranking.
-- **Ferramentas built-in e configuráveis**: delegação entre agentes, resposta à conversa, transferência para humano (via fila de ações pendentes, com aprovação quando exigida), ferramentas HTTP e SQL definidas no banco.
-- **Framework de evals** com datasets por agente e LLM-judge, rodando headless via `NestFactory.createApplicationContext`, integrado ao CI (roda em PRs que tocam o módulo de agentes; falha abaixo de 80 de score médio).
+### 🤖 AI agents — the largest subsystem
+- **Deterministic agent routing** (no LLM in the decision loop): an in-flight conversation keeps its active agent; otherwise the channel's autonomous orchestrator takes over, falling back to the first available worker.
+- **Tool-calling loop** with iteration and delegation-depth limits for agent-to-agent handoff, plus deliberate behavioral guards (a single outbound reply per run, a synthetic nudge when tools ran but produced no response).
+- **Per-model cost routing**: tool iterations always use the provider's cheapest model; only the final synthesis escalates to a stronger model, and only for worker agents — the orchestrator always stays cheap. Per-agent overrides are configurable via JSON, no migration required.
+- **RAG on pgvector**: a knowledge base indexed and queried via raw SQL, with reranking.
+- **Built-in and configurable tools**: agent-to-agent delegation, replying to the conversation, human handoff (via a pending-actions queue with approval when required), and database-configured HTTP/SQL tools.
+- **Evaluation framework** with per-agent datasets and an LLM judge, running headless via `NestFactory.createApplicationContext`, wired into CI (runs on PRs touching the agents module; fails below an average score of 80).
 
-### 🔁 Automações — outbox transacional
-Módulo global de outbox: qualquer módulo de domínio emite eventos de automação dentro da mesma transação Prisma da mutação de negócio, com dedupe por chave e drenagem via worker dedicado — garantindo que nenhum gatilho de automação se perca por falha entre a escrita e o disparo.
+### 🔁 Automations — transactional outbox
+A global outbox module: any domain module emits automation events inside the same Prisma transaction as the business mutation, with dedup keys and a dedicated worker drain — ensuring no automation trigger is ever lost between the write and the dispatch.
 
-### 🔐 Multi-tenancy e controle de acesso
-Guards por controller (`JwtAuthGuard`, `OrgGuard`, `RolesGuard`); `OrgGuard` exige header de organização, valida associação e popula ACL de canais por usuário (papéis OWNER/ADMIN com acesso total, AGENT com lista explícita). Integrações externas autenticam via API key contra um módulo de API pública dedicado.
+### 🔐 Multi-tenancy & access control
+Per-controller guards (`JwtAuthGuard`, `OrgGuard`, `RolesGuard`); `OrgGuard` requires an organization header, verifies membership, and populates per-user channel ACLs (OWNER/ADMIN get full access, AGENT gets an explicit allow-list). External integrations authenticate via API key against a dedicated public-API module.
 
-### ⏱️ Filas de trabalho dedicadas
-Mensagens de entrada/saída, processamento de chatbot, roteamento de conversa, timers de SLA, notificações, processamento de mídia, indexação de RAG/base de conhecimento, extração de memória, sincronização de canal, hidratação de avatar, watchdog e recuperação de vendas — cada uma isolada com seu próprio consumidor.
+### ⏱️ Dedicated work queues
+Inbound/outbound messages, chatbot processing, conversation routing, SLA timers, notifications, media processing, RAG/knowledge indexing, memory extraction, channel sync, avatar hydration, a watchdog, and sales recovery — each isolated behind its own consumer.
 
 ---
 
-## Arquitetura
+## Architecture
 
 ```
 src/
 ├── main.ts                     # bootstrap, Helmet, CORS, Swagger
-├── app.module.ts                # módulo raiz, registro de todas as filas BullMQ
-├── common/                       # filtros globais, interceptors, exceptions, guards
-├── config/                        # carregadores de configuração de ambiente
-├── database/                       # módulo Prisma
+├── app.module.ts                # root module, registers all BullMQ queues
+├── common/                       # global filters, interceptors, exceptions, guards
+├── config/                        # environment configuration loaders
+├── database/                       # Prisma module
 └── modules/
-    ├── channel-hub/                  # adaptadores de canal (portas & adaptadores)
+    ├── channel-hub/                  # channel adapters (ports & adapters)
     │   ├── ports/                       # InboundChannelPort, OutboundChannelPort, HistorySyncPort
     │   └── adapters/                     # zappfy, uazapi, whatsapp-official, instagram, gmail
-    ├── messaging/                     # pipeline de mensagens, conversas, FSM de estado
-    ├── realtime/                       # gateway Socket.IO
+    ├── messaging/                     # message pipeline, conversations, state machine
+    ├── realtime/                       # Socket.IO gateway
     ├── ai-agents/                       # router, runner, model-router, llm, prompts, rag, tools
-    │   ├── router/                          # seleção determinística de agente
-    │   ├── runner/                           # loop de tool-calling + roteamento de custo
-    │   ├── rag/ knowledge/                    # pgvector, base de conhecimento
-    │   ├── tools/                              # built-in + HTTP/SQL configuráveis
-    │   ├── confirmations/                       # ações pendentes de aprovação
+    │   ├── router/                          # deterministic agent selection
+    │   ├── runner/                           # tool-calling loop + cost routing
+    │   ├── rag/ knowledge/                    # pgvector, knowledge base
+    │   ├── tools/                              # built-in + configurable HTTP/SQL
+    │   ├── confirmations/                       # pending actions requiring approval
     │   └── evals/                                 # datasets + LLM judge
-    ├── chatbot/                         # fluxos de decisão sem IA generativa
-    ├── automations/                     # outbox transacional (módulo @Global)
-    ├── organizations/ users/ iam/       # multi-tenancy, IAM, channel-access
-    ├── pipelines/ segments/            # CRM leve
-    ├── sales-recovery/                  # automação de recuperação de carrinho
-    ├── inbox-views/                       # query builder dinâmico de filtros
-    ├── tags/ quick-replies/ ratings/    # metadados
-    └── public-api/                        # autenticação por API key para integrações externas
+    ├── chatbot/                         # non-generative decision-tree flows
+    ├── automations/                     # transactional outbox (a @Global module)
+    ├── organizations/ users/ iam/       # multi-tenancy, IAM, channel access
+    ├── pipelines/ segments/            # lightweight CRM
+    ├── sales-recovery/                  # cart-abandonment automation
+    ├── inbox-views/                       # dynamic filter query builder
+    ├── tags/ quick-replies/ ratings/    # metadata
+    └── public-api/                        # API-key auth for external integrations
 ```
 
-### Fluxo de dados
+### Data flow
 
 ```
-Cliente (WhatsApp/Instagram/Gmail)
+Customer (WhatsApp / Instagram / Gmail)
         │  webhook
         ▼
-webhook-gateway.controller  ──▶  persiste payload bruto  ──▶  fila inbound-messages
+webhook-gateway.controller  ──▶  persist raw payload  ──▶  inbound-messages queue
         │
         ▼
 inbound-message.processor
-  ├─ resolve idempotência / contato / conversa
-  ├─ persiste mensagem
-  ├─ emite evento em tempo real (Socket.IO)
+  ├─ idempotency claim / contact resolve / conversation resolve
+  ├─ persist message
+  ├─ emit realtime event (Socket.IO)
   └─ debounce (10s) ──▶ agent-router ──▶ agent-runner (tool-calling loop)
                                                 │
                                                 ▼
-                                    fila outbound-messages ──▶ adaptador do canal
+                                    outbound-messages queue ──▶ channel adapter
 ```
 
-### Decisões técnicas que valeram a pena documentar
+### Technical decisions worth documenting
 
-- **Roteamento de agente sem LLM.** A escolha de qual agente responde é determinística (estado da conversa + hierarquia orquestrador/worker), não uma classificação por modelo — mais previsível, mais barato e mais rápido de depurar.
-- **Prompts em camadas compostas.** Segurança (imutável, isolamento de tenant + anti-injeção), personalidade, capacidades e contexto são camadas separadas, montadas em ordem fixa via template, com RAG injetado por último.
-- **Outbox transacional para automações.** Eventos de negócio nunca se perdem entre a escrita no banco e o disparo da automação, porque são gravados na mesma transação.
-- **Transferência para humano é sempre assíncrona.** Nunca acontece "na hora" dentro do loop do agente — vira uma ação pendente crítica em fila, com um roteiro de resposta imediata para o agente, evitando estados inconsistentes de handoff.
-- **Custo como restrição de arquitetura, não como otimização posterior.** O modelo caro só é usado na síntese final de agentes worker; toda iteração intermediária de ferramentas usa o modelo mais barato do mesmo provedor.
+- **No-LLM agent routing.** Deciding which agent answers is deterministic (conversation state + orchestrator/worker hierarchy), not an LLM classification step — more predictable, cheaper, and far easier to debug.
+- **Layered, composable prompts.** Security (immutable, tenant isolation + anti-injection), personality, capabilities, and context are separate layers, assembled in a fixed order via a template, with RAG appended last.
+- **Transactional outbox for automations.** Business events are never lost between the database write and the automation firing, because they're written in the same transaction.
+- **Human handoff is always asynchronous.** It never happens "on the spot" inside the agent loop — it becomes a critical pending action in a queue, with an immediate response script for the agent, avoiding inconsistent handoff states.
+- **Cost as a design constraint, not a later optimization.** The expensive model is only used for the final synthesis of worker agents; every intermediate tool iteration uses the same provider's cheapest model.
 
 ---
 
-## Rodando localmente
+## Running locally
 
 ```bash
 npm install
 
-# variáveis de ambiente (ver .env.example)
+# environment variables (see .env.example)
 # DATABASE_URL, REDIS_*, JWT_SECRET, OPENAI_API_KEY, etc.
 
 npm run prisma:generate
 npm run prisma:migrate
 
-npm run start:dev          # http://localhost:3001 — Swagger em /docs
+npm run start:dev          # http://localhost:3001 — Swagger at /docs
 ```
 
 ```bash
-npm test                   # suíte Jest (unitários)
-npm run typecheck          # tsc --noEmit — gate de qualidade (sem ESLint configurado)
-npm run evals               # avaliação completa de agentes de IA (requer DB + Redis + chaves de API)
-npm run evals:agent "Nome do Agente"
+npm test                   # Jest suite (unit)
+npm run typecheck          # tsc --noEmit — the de-facto quality gate (no ESLint configured)
+npm run evals               # full AI agent evaluation (requires DB + Redis + API keys)
+npm run evals:agent "Agent Name"
 ```
 
-Requer PostgreSQL (com extensão `pgvector`) e Redis rodando. Em produção, storage de arquivos exige as quatro variáveis `R2_*` (Cloudflare R2) — disco local não sobrevive a redeploys.
+Requires PostgreSQL (with the `pgvector` extension) and Redis running. In production, file storage requires all four `R2_*` variables (Cloudflare R2) — local disk doesn't survive redeploys.
 
 ## Deploy
 
-Container Docker executa `prisma migrate deploy` na inicialização. Node 20 fixo (dependências não compatíveis com Node ≥ 22 são evitadas deliberadamente).
+The Docker container runs `prisma migrate deploy` on startup. Pinned to Node 20 (dependencies requiring Node ≥ 22 are deliberately avoided).
 
 ---
 
-## Sobre este projeto
+## About this project
 
-A Intelli Chat nasceu para resolver um problema operacional real: atendimento multi-canal que não trava quando o volume cresce, com IA que responde de forma consistente e barata, e automações que não perdem eventos. Este backend é onde essas garantias são implementadas — filas em vez de chamadas síncronas, transações em vez de best-effort, e uma arquitetura de agentes desenhada para custo e previsibilidade desde o primeiro dia.
+Intelli Chat was built to solve a real operational problem: multi-channel customer service that doesn't fall over as volume grows, AI that answers consistently and cheaply, and automations that never drop an event. This backend is where those guarantees are implemented — queues instead of synchronous calls, transactions instead of best-effort, and an agent architecture designed for cost and predictability from day one.
 
-Repositórios relacionados: [`chat-intelli-web`](../chat-intelli-web) (frontend Next.js) · [`chat-intelli-mcp`](../chat-intelli-mcp) (servidor MCP para integração com Claude)
+---
+
+## The Intelli Chat ecosystem
+
+This repository is one of three pieces that make up the platform:
+
+### ⚙️ [`chat-intelli-api`](.) — *this repository*
+Backend built with NestJS 11, the platform's brain. Receives WhatsApp/Instagram/Gmail messages via webhook, processes them through an async, queue-driven pipeline (BullMQ + Redis), and routes them to AI agents with tool-calling, RAG (pgvector), and per-model cost routing. Automations run on a transactional outbox; multi-tenancy and per-channel ACLs are enforced via guards throughout the API. Persistence in PostgreSQL via Prisma.
+
+### 🖥️ [`chat-intelli-web`](../chat-intelli-web)
+Frontend built with Next.js 16 + React 19. The product's interface: realtime inbox, visual chatbot/automation builders, an AI agents control center, pipelines, and settings — a pure API client with no server-side logic of its own.
+
+### 🔌 [`chat-intelli-mcp`](../chat-intelli-mcp)
+A [Model Context Protocol](https://modelcontextprotocol.io) server that exposes this API's dashboard indicators as read-only tools for Claude — ask the assistant directly about service metrics without leaving Claude Code/Desktop. A thin, per-session multi-tenant proxy with no state or business logic of its own.
