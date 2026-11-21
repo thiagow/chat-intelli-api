@@ -423,6 +423,34 @@ export class ChannelsService {
     }
   }
 
+  /**
+   * Estado real da conexão, barato o bastante para o card de canais consultar em
+   * polling. Só UaZAPI tem sessão de WhatsApp que pode cair/hibernar; os demais
+   * tipos devolvem `supported: false` e o front mantém o badge de ativo/inativo.
+   */
+  async getConnectionStatus(id: string, organizationId: string, access?: ChannelAccess) {
+    const channel = await this.findOne(id, organizationId, access);
+    if (channel.type !== ChannelType.WHATSAPP_UAZAPI) return { supported: false as const };
+    try {
+      const raw = await this.uazapiHttpClient.getInstanceStatus(channel);
+      const conn = parseUazapiConnectionState(raw);
+      return {
+        supported: true as const,
+        connected: conn.recognized ? conn.connected : null,
+        state: conn.state,
+        label: describeUazapiState(conn.state),
+      };
+    } catch (error: any) {
+      const http = error.response?.status;
+      return {
+        supported: true as const,
+        connected: false,
+        state: http === 401 || http === 403 ? 'unauthorized' : 'unreachable',
+        label: http === 401 || http === 403 ? 'token recusado' : 'servidor inacessível',
+      };
+    }
+  }
+
   async testConnection(id: string, organizationId: string) {
     const channel = await this.findOne(id, organizationId);
 

@@ -105,6 +105,19 @@ export class ChannelsController {
     return this.service.cancelSync(id, orgId);
   }
 
+  @Get(':id/connection')
+  @ApiOperation({
+    summary:
+      'Live connection state of the channel session (WhatsApp UaZAPI: connected / hibernated / disconnected). Other types: { supported: false }.',
+  })
+  getConnectionStatus(
+    @Param('id') id: string,
+    @CurrentOrg('id') orgId: string,
+    @CurrentChannelAccess() access: ChannelAccess,
+  ) {
+    return this.service.getConnectionStatus(id, orgId, access);
+  }
+
   @Post(':id/test')
   @Roles(OrgRole.OWNER, OrgRole.ADMIN)
   @ApiOperation({ summary: 'Test channel connection' })
