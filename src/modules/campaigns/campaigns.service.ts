@@ -484,7 +484,9 @@ export class CampaignsService {
 
   async sendNow(orgId: string, id: string, access: ChannelAccess) {
     const c = await this.getOwned(orgId, id, access);
-    if (c.status !== 'SCHEDULED') throw new ConflictException('Só dá para antecipar um envio já agendado na fila do provider');
+    if (!['SUBMITTING', 'SCHEDULED'].includes(c.status)) {
+      throw new ConflictException('Só dá para antecipar uma campanha iniciada e ainda não em andamento');
+    }
     const n = await this.engine.sendNow(id);
     if (!n) throw new ConflictException('Nenhum lote agendado para antecipar');
     return { batchesStarted: n };

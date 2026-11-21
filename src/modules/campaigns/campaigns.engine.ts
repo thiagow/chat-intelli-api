@@ -773,6 +773,16 @@ export class CampaignsEngine {
     const campaign = await this.loadCampaign(campaignId);
     if (!campaign) throw new NotFoundException('Campanha não encontrada');
     const bulk = this.bulkFor(campaign.channel);
+
+    // Lotes ainda não entregues ao provider (a submissão é preguiçosa: 10 min antes da janela)
+    // são submetidos agora; em seguida o send_now antecipa a pasta já criada.
+    const planned = await this.prisma.campaignBatch.findMany({
+      where: { campaignId, status: 'PLANNED' },
+      orderBy: { batchIndex: 'asc' },
+      select: { id: true },
+    });
+    for (const b of planned) await this.submitBatch(campaignId, b.id);
+
     const batches = await this.prisma.campaignBatch.findMany({
       where: { campaignId, status: 'SCHEDULED', providerFolderId: { not: null } },
     });
