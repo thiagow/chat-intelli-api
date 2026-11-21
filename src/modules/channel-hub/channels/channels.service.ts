@@ -3,8 +3,6 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
-  HttpException,
-  HttpStatus,
   Logger,
 } from '@nestjs/common';
 import { ChannelType, ChannelSyncMode, ChannelSyncStatus, OrgRole } from '@prisma/client';
@@ -380,50 +378,6 @@ export class ChannelsService {
   }
 
   /**
-   * Inicia o pareamento da instância UaZAPI: sem `phone` devolve QR code; com `phone`,
-   * código de pareamento. Se já estiver conectada, não mexe na sessão.
-   */
-  async connectChannel(id: string, organizationId: string, phone?: string) {
-    const channel = await this.findOne(id, organizationId);
-    if (channel.type !== ChannelType.WHATSAPP_UAZAPI) {
-      throw new BadRequestException('Reconexão por QR só está disponível para canais WhatsApp (UaZAPI).');
-    }
-
-    const before = parseUazapiConnectionState(await this.uazapiHttpClient.getInstanceStatus(channel));
-    if (before.connected) return { alreadyConnected: true, state: before.state };
-
-    const digits = phone ? phone.replace(/\D/g, '') : undefined;
-    if (phone && (!digits || digits.length < 10)) {
-      throw new BadRequestException('Telefone inválido para o código de pareamento');
-    }
-
-    try {
-      const res = await this.uazapiHttpClient.connectInstance(channel, digits ? { phone: digits } : {});
-      return {
-        alreadyConnected: false,
-        state: 'connecting',
-        qrcode: res.qrcode || undefined,
-        pairingCode: res.pairingCode || undefined,
-      };
-    } catch (error: any) {
-      const http = error.response?.status;
-      this.logger.error(`connectChannel ${id} falhou: http=${http ?? '-'} ${error.response?.data?.message ?? error.message}`);
-      if (http === 429) {
-        // Pela doc da UaZAPI, 429 aqui = limite de instâncias conectadas do servidor/plano.
-        // Não é um rate limit passageiro: esperar não resolve.
-        const detail = error.response?.data?.message || error.response?.data?.error;
-        throw new HttpException(
-          'A UaZAPI recusou a conexão: o limite de instâncias conectadas deste servidor/plano foi atingido. ' +
-            'Libere uma vaga na UaZAPI ou use outra instância em "Editar credenciais".' +
-            (detail ? ` (UaZAPI: ${detail})` : ''),
-          HttpStatus.TOO_MANY_REQUESTS,
-        );
-      }
-      throw new BadRequestException(error.response?.data?.message || error.message);
-    }
-  }
-
-  /**
    * Estado real da conexão, barato o bastante para o card de canais consultar em
    * polling. Só UaZAPI tem sessão de WhatsApp que pode cair/hibernar; os demais
    * tipos devolvem `supported: false` e o front mantém o badge de ativo/inativo.
@@ -500,7 +454,7 @@ export class ChannelsService {
             return {
               ...base,
               success: false,
-              error: `WhatsApp ${describeUazapiState(conn.state)}. Use "Reconectar" para ler o QR code.`,
+              error: `WhatsApp ${describeUazapiState(conn.state)}. Reconecte a instância no painel da UaZAPI (leitura do QR code) e teste novamente.`,
             };
           }
           return { ...base, success: true };

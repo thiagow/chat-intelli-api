@@ -125,20 +125,6 @@ export class ChannelsController {
     return this.service.testConnection(id, orgId);
   }
 
-  @Post(':id/connect')
-  @Roles(OrgRole.OWNER, OrgRole.ADMIN)
-  @ApiOperation({
-    summary:
-      'Reconnect a WhatsApp (UaZAPI) channel: returns a QR code (or a pairing code when `phone` is given). No-op if already connected.',
-  })
-  connectChannel(
-    @Param('id') id: string,
-    @CurrentOrg('id') orgId: string,
-    @Body() body: { phone?: string },
-  ) {
-    return this.service.connectChannel(id, orgId, body?.phone);
-  }
-
   @Get(':id/templates')
   @ApiOperation({
     summary:
