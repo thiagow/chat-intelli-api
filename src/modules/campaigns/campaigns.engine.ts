@@ -776,8 +776,12 @@ export class CampaignsEngine {
 
     // Lotes ainda não entregues ao provider (a submissão é preguiçosa: 10 min antes da janela)
     // são submetidos agora; em seguida o send_now antecipa a pasta já criada.
+    // Inclui SUBMITTING sem pasta: tentativa anterior que falhou (ex.: canal offline) e ficou parada.
     const planned = await this.prisma.campaignBatch.findMany({
-      where: { campaignId, status: 'PLANNED' },
+      where: {
+        campaignId,
+        OR: [{ status: 'PLANNED' }, { status: 'SUBMITTING', providerFolderId: null }],
+      },
       orderBy: { batchIndex: 'asc' },
       select: { id: true },
     });
