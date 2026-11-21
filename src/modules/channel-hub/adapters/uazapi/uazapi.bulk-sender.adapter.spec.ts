@@ -85,6 +85,21 @@ describe('UazapiBulkSenderAdapter', () => {
     expect(await adapter.isConnected(channel)).toBe(true);
   });
 
+  it('isConnected lê o formato real da UaZAPI (instância hibernada/offline não envia)', async () => {
+    http.getInstanceStatus.mockResolvedValue({
+      instance: { status: 'hibernated' },
+      status: { connected: false, loggedIn: false, jid: null },
+    });
+    expect(await adapter.isConnected(channel)).toBe(false);
+    http.getInstanceStatus.mockResolvedValue({
+      instance: { status: 'connected' },
+      status: { connected: true, loggedIn: true, jid: 'x@s.whatsapp.net' },
+    });
+    expect(await adapter.isConnected(channel)).toBe(true);
+    http.getInstanceStatus.mockResolvedValue({ instance: { status: 'hibernated' } });
+    expect(await adapter.isConnected(channel)).toBe(false);
+  });
+
   it('ensureWebhook assina os eventos de envio em massa', async () => {
     await adapter.ensureWebhook(channel, 'https://x/y');
     expect(http.configureWebhook).toHaveBeenCalledWith(channel, 'https://x/y', ['messages', 'messages_update', 'sender']);

@@ -130,6 +130,16 @@ export class UazapiBulkSenderAdapter implements BulkSenderPort {
 
   async isConnected(channel: Channel): Promise<boolean> {
     const status = await this.http.getInstanceStatus(channel);
+
+    // Formato real da UaZAPI: { instance: { status: 'connected'|'disconnected'|'hibernated'|… },
+    // status: { connected: boolean, loggedIn: boolean, jid } }. O booleano é o mais confiável.
+    if (typeof status?.status?.connected === 'boolean') {
+      return status.status.connected && status.status.loggedIn !== false;
+    }
+    if (typeof status?.instance?.status === 'string') {
+      return ['connected', 'open'].includes(status.instance.status.toLowerCase());
+    }
+
     const rawState = status?.state;
     const s =
       typeof rawState === 'string'
