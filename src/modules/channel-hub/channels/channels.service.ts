@@ -228,10 +228,39 @@ export class ChannelsService {
     dto: UpdateChannelDto,
     callerUserOrganizationId?: string,
   ) {
-    await this.findOne(id, organizationId);
+    const existing = await this.findOne(id, organizationId);
 
     // Visibility é tratado por caminho separado pra garantir auto-grant.
     const { visibility, ...rest } = dto;
+
+    // UaZAPI: trocar token/baseUrl significa trocar de instância (outro número).
+    // Valida o novo token ANTES de gravar, descarta o instanceId antigo (senão o
+    // webhook da instância nova não casa com este canal) e reconfigura o webhook.
+    let reconfigureUazapiWebhook = false;
+    if (existing.type === ChannelType.WHATSAPP_UAZAPI && rest.config) {
+      const prev = (existing.config ?? {}) as Record<string, any>;
+      const next = { ...rest.config } as Record<string, any>;
+      const tokenChanged = !!next.token && next.token !== prev.token;
+      const baseChanged = (next.baseUrl ?? '') !== (prev.baseUrl ?? '');
+      if (tokenChanged || baseChanged) {
+        if (!String(next.token ?? '').trim()) {
+          throw new BadRequestException('O token da instância UaZAPI é obrigatório');
+        }
+        try {
+          await this.uazapiHttpClient.getInstanceStatus({ ...existing, config: next } as typeof existing);
+        } catch (error: any) {
+          const http = error.response?.status;
+          throw new BadRequestException(
+            http === 401 || http === 403
+              ? 'A UaZAPI recusou o token informado. Confira o token da instância e o servidor (Base URL).'
+              : `Não foi possível validar o token na UaZAPI: ${error.response?.data?.message || error.message}`,
+          );
+        }
+        delete next.instanceId;
+        rest.config = next;
+        reconfigureUazapiWebhook = true;
+      }
+    }
     if (visibility && callerUserOrganizationId) {
       await this.channelAccess.setChannelVisibility(
         id,
@@ -244,7 +273,14 @@ export class ChannelsService {
     if (Object.keys(rest).length === 0) {
       return this.repository.findById(id);
     }
-    return this.repository.update(id, rest);
+    const updated = await this.repository.update(id, rest);
+    if (reconfigureUazapiWebhook) {
+      this.logger.log(`Canal ${id}: instância UaZAPI trocada — reconfigurando webhook`);
+      this.configureUazapiWebhook(id).catch((err) =>
+        this.logger.warn(`Uazapi webhook config failed após troca de token: ${err.message}`),
+      );
+    }
+    return updated;
   }
 
   /**
@@ -373,8 +409,13 @@ export class ChannelsService {
       const http = error.response?.status;
       this.logger.error(`connectChannel ${id} falhou: http=${http ?? '-'} ${error.response?.data?.message ?? error.message}`);
       if (http === 429) {
+        // Pela doc da UaZAPI, 429 aqui = limite de instâncias conectadas do servidor/plano.
+        // Não é um rate limit passageiro: esperar não resolve.
+        const detail = error.response?.data?.message || error.response?.data?.error;
         throw new HttpException(
-          'A UaZAPI limitou novas conexões desta instância. Aguarde alguns minutos e tente de novo.',
+          'A UaZAPI recusou a conexão: o limite de instâncias conectadas deste servidor/plano foi atingido. ' +
+            'Libere uma vaga na UaZAPI ou use outra instância em "Editar credenciais".' +
+            (detail ? ` (UaZAPI: ${detail})` : ''),
           HttpStatus.TOO_MANY_REQUESTS,
         );
       }
@@ -416,6 +457,9 @@ export class ChannelsService {
             data: {
               state: conn.state,
               loggedIn: conn.loggedIn,
+              // Identidade da instância: permite comparar com o painel da UaZAPI.
+              instanceName: raw?.instance?.name || undefined,
+              host: ((channel.config as Record<string, any>)?.baseUrl || 'https://free.uazapi.com').replace(/^https?:\/\//, ''),
               profileName: raw?.instance?.profileName || undefined,
               isBusiness: raw?.instance?.isBusiness,
               phone: raw?.status?.jid ? String(raw.status.jid).split(/[@:]/)[0] : undefined,
