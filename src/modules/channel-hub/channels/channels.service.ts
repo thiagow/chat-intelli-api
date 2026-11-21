@@ -3,6 +3,8 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Logger,
 } from '@nestjs/common';
 import { ChannelType, ChannelSyncMode, ChannelSyncStatus, OrgRole } from '@prisma/client';
@@ -13,6 +15,10 @@ import { UpdateChannelDto } from './dto/update-channel.dto';
 import { ChannelAdapterRegistry } from '../channel-adapter.registry';
 import { ZappfyHttpClient } from '../adapters/zappfy/zappfy.http-client';
 import { UazapiHttpClient } from '../adapters/uazapi/uazapi.http-client';
+import {
+  describeUazapiState,
+  parseUazapiConnectionState,
+} from '../adapters/uazapi/uazapi.connection-state';
 import { WhatsAppOfficialHttpClient } from '../adapters/whatsapp-official/whatsapp-official.http-client';
 import { InstagramHttpClient } from '../adapters/instagram/instagram.http-client';
 import { GmailHttpClient } from '../adapters/gmail/gmail.http-client';
@@ -337,6 +343,45 @@ export class ChannelsService {
     return this.waOfficialHttpClient.listTemplates(channel);
   }
 
+  /**
+   * Inicia o pareamento da instância UaZAPI: sem `phone` devolve QR code; com `phone`,
+   * código de pareamento. Se já estiver conectada, não mexe na sessão.
+   */
+  async connectChannel(id: string, organizationId: string, phone?: string) {
+    const channel = await this.findOne(id, organizationId);
+    if (channel.type !== ChannelType.WHATSAPP_UAZAPI) {
+      throw new BadRequestException('Reconexão por QR só está disponível para canais WhatsApp (UaZAPI).');
+    }
+
+    const before = parseUazapiConnectionState(await this.uazapiHttpClient.getInstanceStatus(channel));
+    if (before.connected) return { alreadyConnected: true, state: before.state };
+
+    const digits = phone ? phone.replace(/\D/g, '') : undefined;
+    if (phone && (!digits || digits.length < 10)) {
+      throw new BadRequestException('Telefone inválido para o código de pareamento');
+    }
+
+    try {
+      const res = await this.uazapiHttpClient.connectInstance(channel, digits ? { phone: digits } : {});
+      return {
+        alreadyConnected: false,
+        state: 'connecting',
+        qrcode: res.qrcode || undefined,
+        pairingCode: res.pairingCode || undefined,
+      };
+    } catch (error: any) {
+      const http = error.response?.status;
+      this.logger.error(`connectChannel ${id} falhou: http=${http ?? '-'} ${error.response?.data?.message ?? error.message}`);
+      if (http === 429) {
+        throw new HttpException(
+          'A UaZAPI limitou novas conexões desta instância. Aguarde alguns minutos e tente de novo.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      throw new BadRequestException(error.response?.data?.message || error.message);
+    }
+  }
+
   async testConnection(id: string, organizationId: string) {
     const channel = await this.findOne(id, organizationId);
 
@@ -361,21 +406,32 @@ export class ChannelsService {
         }
 
         case ChannelType.WHATSAPP_UAZAPI: {
-          const status = await this.uazapiHttpClient.getInstanceStatus(channel);
-          const rawState = status?.state;
-          const statusStr =
-            typeof rawState === 'string'
-              ? rawState
-              : typeof rawState === 'object' && rawState?.status
-                ? String(rawState.status)
-                : typeof status?.status === 'string'
-                  ? status.status
-                  : 'connected';
-          return {
-            success: true,
-            status: statusStr,
-            data: status,
+          // O sucesso depende da sessão do WhatsApp estar logada — não basta o token responder.
+          const raw = await this.uazapiHttpClient.getInstanceStatus(channel);
+          const conn = parseUazapiConnectionState(raw);
+          const base = {
+            status: conn.state,
+            connected: conn.connected,
+            // Nunca devolve token/QR da instância ao front (a resposta bruta os traz).
+            data: {
+              state: conn.state,
+              loggedIn: conn.loggedIn,
+              profileName: raw?.instance?.profileName || undefined,
+              isBusiness: raw?.instance?.isBusiness,
+              phone: raw?.status?.jid ? String(raw.status.jid).split(/[@:]/)[0] : undefined,
+            },
           };
+          if (!conn.recognized) {
+            return { ...base, success: false, error: 'Resposta de status da UaZAPI não reconhecida' };
+          }
+          if (!conn.connected) {
+            return {
+              ...base,
+              success: false,
+              error: `WhatsApp ${describeUazapiState(conn.state)}. Use "Reconectar" para ler o QR code.`,
+            };
+          }
+          return { ...base, success: true };
         }
 
         case ChannelType.WHATSAPP_OFFICIAL: {

@@ -12,6 +12,7 @@ import {
   ListFolderMessagesResult,
 } from '../../ports/types';
 import { UazapiHttpClient } from './uazapi.http-client';
+import { parseUazapiConnectionState } from './uazapi.connection-state';
 
 export const UAZAPI_WEBHOOK_EVENTS = ['messages', 'messages_update', 'sender'];
 
@@ -131,14 +132,10 @@ export class UazapiBulkSenderAdapter implements BulkSenderPort {
   async isConnected(channel: Channel): Promise<boolean> {
     const status = await this.http.getInstanceStatus(channel);
 
-    // Formato real da UaZAPI: { instance: { status: 'connected'|'disconnected'|'hibernated'|… },
-    // status: { connected: boolean, loggedIn: boolean, jid } }. O booleano é o mais confiável.
-    if (typeof status?.status?.connected === 'boolean') {
-      return status.status.connected && status.status.loggedIn !== false;
-    }
-    if (typeof status?.instance?.status === 'string') {
-      return ['connected', 'open'].includes(status.instance.status.toLowerCase());
-    }
+    // Formato real da UaZAPI (ver uazapi.connection-state.ts). Formato reconhecido manda;
+    // indeterminado = true para não pausar campanha por palpite.
+    const parsed = parseUazapiConnectionState(status);
+    if (parsed.recognized) return parsed.connected;
 
     const rawState = status?.state;
     const s =
