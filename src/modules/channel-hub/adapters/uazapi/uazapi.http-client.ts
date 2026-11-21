@@ -209,9 +209,52 @@ export class UazapiHttpClient {
 
   // ─── Envio em massa (/sender/*, /chat/check) ─────────────────────────
 
+  /**
+   * Diagnóstico do envio em massa: registra endpoint, duração, resumo do pedido e a
+   * resposta bruta (truncada). Números saem mascarados e o texto das mensagens nunca
+   * é gravado. Útil para validar o formato real da UaZAPI, que foi escrito pela doc.
+   */
+  private async traceBulk<T>(label: string, summary: string, fn: () => Promise<T>): Promise<T> {
+    const started = Date.now();
+    try {
+      const res = await fn();
+      this.logger.log(`[bulk] ${label} ok ${Date.now() - started}ms ${summary} resp=${this.clip(res)}`);
+      return res;
+    } catch (error: any) {
+      const status = error?.response?.status ?? 'sem-status';
+      const body = error?.response?.data ?? error?.message;
+      this.logger.error(
+        `[bulk] ${label} ERRO ${Date.now() - started}ms http=${status} ${summary} resp=${this.clip(body)}`,
+      );
+      throw error;
+    }
+  }
+
+  private clip(value: unknown, max = 1500): string {
+    let s: string;
+    try {
+      s = typeof value === 'string' ? value : JSON.stringify(value);
+    } catch {
+      s = String(value);
+    }
+    if (!s) return 'undefined';
+    // Telefones (chatid, jid, query) saem mascarados: 10+ dígitos seguidos → ***últimos4.
+    s = s.replace(/\d{6,}(\d{4})/g, '***$1');
+    return s.length > max ? `${s.slice(0, max)}…(+${s.length - max})` : s;
+  }
+
+  private maskNumber(n: string): string {
+    const d = String(n).replace(/\D/g, '');
+    return d.length > 4 ? `***${d.slice(-4)}` : '***';
+  }
+
   /** `POST /chat/check` — resolve JID real + presença no WhatsApp. */
   async checkNumbers(channel: Channel, numbers: string[]): Promise<any> {
-    return this.sendRequest(channel, '/chat/check', { numbers });
+    return this.traceBulk(
+      '/chat/check',
+      `numbers=${numbers.length}[${numbers.slice(0, 5).map((n) => this.maskNumber(n)).join(',')}]`,
+      () => this.sendRequest(channel, '/chat/check', { numbers }),
+    );
   }
 
   /**
@@ -229,7 +272,14 @@ export class UazapiHttpClient {
       scheduled_for?: number;
     },
   ): Promise<any> {
-    return this.sendRequest(channel, '/sender/advanced', payload);
+    return this.traceBulk(
+      '/sender/advanced',
+      `info=${payload.info} msgs=${payload.messages.length}[${payload.messages
+        .slice(0, 5)
+        .map((m) => this.maskNumber(m.number))
+        .join(',')}] delay=${payload.delayMin}-${payload.delayMax}s scheduled_for=${payload.scheduled_for ?? 'agora'}`,
+      () => this.sendRequest(channel, '/sender/advanced', payload),
+    );
   }
 
   /** `POST /sender/edit` — stop | continue | delete | reschedule | send_now. */
@@ -237,21 +287,20 @@ export class UazapiHttpClient {
     channel: Channel,
     payload: { folder_id: string; action: string; scheduled_for?: number },
   ): Promise<any> {
-    return this.sendRequest(channel, '/sender/edit', payload);
+    return this.traceBulk(
+      '/sender/edit',
+      `folder=${payload.folder_id} action=${payload.action}`,
+      () => this.sendRequest(channel, '/sender/edit', payload),
+    );
   }
 
   /** `GET /sender/listfolders`. */
   async senderListFolders(channel: Channel): Promise<any> {
     const client = this.createClient(channel);
-    try {
+    return this.traceBulk('/sender/listfolders', '', async () => {
       const response = await client.get('/sender/listfolders');
       return response.data;
-    } catch (error: any) {
-      this.logger.error(
-        `Uazapi API error: /sender/listfolders - ${error.response?.data?.message || error.message}`,
-      );
-      throw error;
-    }
+    });
   }
 
   /** `POST /sender/listmessages` — limit ≤ 1000. */
@@ -259,7 +308,11 @@ export class UazapiHttpClient {
     channel: Channel,
     payload: { folder_id: string; messageStatus?: string; limit?: number; offset?: number },
   ): Promise<any> {
-    return this.sendRequest(channel, '/sender/listmessages', payload);
+    return this.traceBulk(
+      '/sender/listmessages',
+      `folder=${payload.folder_id} status=${payload.messageStatus ?? '*'} limit=${payload.limit ?? '-'} offset=${payload.offset ?? 0}`,
+      () => this.sendRequest(channel, '/sender/listmessages', payload),
+    );
   }
 
   async getMediaBuffer(channel: Channel, mediaUrl: string): Promise<Buffer> {
