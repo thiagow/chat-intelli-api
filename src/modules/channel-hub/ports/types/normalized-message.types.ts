@@ -1,3 +1,4 @@
+import type { BulkFolderEvent } from './bulk-sender.types';
 import { ChannelType } from '@prisma/client';
 
 export enum MessageContentType {
@@ -153,6 +154,8 @@ export interface WebhookParseResult {
   messages: NormalizedInboundMessage[];
   statuses: StatusUpdate[];
   errors: WebhookError[];
+  /** Eventos de envio em massa (ex.: UaZAPI `sender`), roteados para a fila de campanhas. */
+  bulkEvents?: BulkFolderEvent[];
 }
 
 export interface WebhookError {

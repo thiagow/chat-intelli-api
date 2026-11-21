@@ -21,6 +21,7 @@ import { ChannelAdapterRegistry } from './channel-adapter.registry';
 import { ChannelsService } from './channels/channels.service';
 import { WebhookEventsService } from './webhook-events.service';
 import { WebhookThrottleGuard } from './webhook-throttle.guard';
+import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS } from '../campaigns/campaigns.constants';
 
 @ApiTags('Webhooks')
 @Controller('webhooks')
@@ -33,6 +34,7 @@ export class WebhookGatewayController {
     private readonly channelsService: ChannelsService,
     private readonly webhookEvents: WebhookEventsService,
     @InjectQueue('inbound-messages') private readonly inboundQueue: Queue,
+    @InjectQueue(CAMPAIGNS_QUEUE) private readonly campaignsQueue: Queue,
   ) {}
 
   @Post(':channelType')
@@ -149,6 +151,23 @@ export class WebhookGatewayController {
           {
             attempts: 3,
             backoff: { type: 'exponential', delay: 1000 },
+            removeOnComplete: true,
+            removeOnFail: false,
+          },
+        );
+      }
+
+      for (const bulkEvent of parseResult.bulkEvents ?? []) {
+        await this.campaignsQueue.add(
+          CAMPAIGN_JOBS.SENDER_EVENT,
+          {
+            channelId: channel.id,
+            organizationId: channel.organizationId,
+            event: bulkEvent,
+          },
+          {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 2000 },
             removeOnComplete: true,
             removeOnFail: false,
           },

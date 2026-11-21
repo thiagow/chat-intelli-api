@@ -3,6 +3,7 @@ import { UazapiInboundAdapter } from './uazapi.inbound-adapter';
 import { UazapiOutboundAdapter } from './uazapi.outbound-adapter';
 import { UazapiMessageMapper } from './uazapi.message-mapper';
 import { UazapiHttpClient } from './uazapi.http-client';
+import { UazapiBulkSenderAdapter } from './uazapi.bulk-sender.adapter';
 import { UazapiSyncAdapter } from './uazapi.sync-adapter';
 import { UazapiContactEnricherService } from './uazapi-contact-enricher.service';
 import { MessagingModule } from '../../../messaging/messaging.module';
@@ -25,6 +26,7 @@ import { MessagingModule } from '../../../messaging/messaging.module';
     UazapiMessageMapper,
     UazapiHttpClient,
     UazapiSyncAdapter,
+    UazapiBulkSenderAdapter,
     UazapiContactEnricherService,
   ],
   exports: [
@@ -32,6 +34,7 @@ import { MessagingModule } from '../../../messaging/messaging.module';
     UazapiOutboundAdapter,
     UazapiHttpClient,
     UazapiSyncAdapter,
+    UazapiBulkSenderAdapter,
     UazapiContactEnricherService,
   ],
 })

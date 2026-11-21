@@ -196,7 +196,7 @@ export class UazapiHttpClient {
   async configureWebhook(
     channel: Channel,
     url: string,
-    events = ['messages', 'messages_update'],
+    events = ['messages', 'messages_update', 'sender'],
     excludeMessages?: string[],
   ): Promise<any> {
     return this.sendRequest(channel, '/webhook', {
@@ -205,6 +205,61 @@ export class UazapiHttpClient {
       events,
       ...(excludeMessages && { excludeMessages }),
     });
+  }
+
+  // ─── Envio em massa (/sender/*, /chat/check) ─────────────────────────
+
+  /** `POST /chat/check` — resolve JID real + presença no WhatsApp. */
+  async checkNumbers(channel: Channel, numbers: string[]): Promise<any> {
+    return this.sendRequest(channel, '/chat/check', { numbers });
+  }
+
+  /**
+   * `POST /sender/advanced` — cria uma pasta de envio. delay em SEGUNDOS;
+   * `scheduled_for` em epoch ms (a UaZAPI também aceita minutos, mas ms é
+   * inequívoco).
+   */
+  async senderAdvanced(
+    channel: Channel,
+    payload: {
+      messages: Array<{ number: string; type: 'text'; text: string }>;
+      delayMin: number;
+      delayMax: number;
+      info: string;
+      scheduled_for?: number;
+    },
+  ): Promise<any> {
+    return this.sendRequest(channel, '/sender/advanced', payload);
+  }
+
+  /** `POST /sender/edit` — stop | continue | delete | reschedule | send_now. */
+  async senderEdit(
+    channel: Channel,
+    payload: { folder_id: string; action: string; scheduled_for?: number },
+  ): Promise<any> {
+    return this.sendRequest(channel, '/sender/edit', payload);
+  }
+
+  /** `GET /sender/listfolders`. */
+  async senderListFolders(channel: Channel): Promise<any> {
+    const client = this.createClient(channel);
+    try {
+      const response = await client.get('/sender/listfolders');
+      return response.data;
+    } catch (error: any) {
+      this.logger.error(
+        `Uazapi API error: /sender/listfolders - ${error.response?.data?.message || error.message}`,
+      );
+      throw error;
+    }
+  }
+
+  /** `POST /sender/listmessages` — limit ≤ 1000. */
+  async senderListMessages(
+    channel: Channel,
+    payload: { folder_id: string; messageStatus?: string; limit?: number; offset?: number },
+  ): Promise<any> {
+    return this.sendRequest(channel, '/sender/listmessages', payload);
   }
 
   async getMediaBuffer(channel: Channel, mediaUrl: string): Promise<Buffer> {

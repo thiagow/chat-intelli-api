@@ -1,3 +1,4 @@
+import { CampaignTrackingModule } from '../campaigns/tracking/campaign-tracking.module';
 import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { AVATAR_HYDRATION_QUEUE } from '../channel-hub/avatars/avatar-hydration.constants';
@@ -47,6 +48,7 @@ import { ContactsRepository } from './contacts/contacts.repository';
     ProjectsModule,
     SalesRecoveryModule,
     StorageModule,
+    CampaignTrackingModule,
   ],
   controllers: [ConversationsController, MessagesController, ContactsController],
   providers: [

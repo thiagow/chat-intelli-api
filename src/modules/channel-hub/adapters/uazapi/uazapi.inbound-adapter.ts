@@ -10,6 +10,7 @@ import {
   VerificationResponse,
 } from '../../ports/types';
 import { UazapiMessageMapper } from './uazapi.message-mapper';
+import { parseSenderEvent } from './uazapi.bulk-sender.adapter';
 
 @Injectable()
 export class UazapiInboundAdapter implements InboundChannelPort {
@@ -121,10 +122,10 @@ export class UazapiInboundAdapter implements InboundChannelPort {
           result.messages.push(normalized);
         }
       } else if (eventType === 'messages_update' || eventType === 'messages.update') {
-        const status = this.mapper.normalizeStatus(event);
-        if (status) {
-          result.statuses.push(status);
-        }
+        result.statuses.push(...this.mapper.normalizeStatus(event));
+      } else if (eventType === 'sender') {
+        const bulk = parseSenderEvent(event);
+        if (bulk) (result.bulkEvents ??= []).push(bulk);
       }
     } catch (error: any) {
       this.logger.error(`Failed to parse Uazapi webhook: ${error.message}`);

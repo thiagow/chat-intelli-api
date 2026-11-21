@@ -148,8 +148,8 @@ export class UazapiMessageMapper {
    *  C) baileys-style numeric ack em lote: `{ messages: [{ id, ack }] }`
    * Aceita as três e converte pro StatusUpdate comum.
    */
-  normalizeStatus(event: any): StatusUpdate | null {
-    if (!event) return null;
+  normalizeStatus(event: any): StatusUpdate[] {
+    if (!event) return [];
 
     const tsToDate = (ts: any): Date => {
       const num = typeof ts === 'string' ? parseInt(ts, 10) : Number(ts);
@@ -182,11 +182,15 @@ export class UazapiMessageMapper {
       const stateStr = String(event?.state || statusEvent?.Type || '').toLowerCase();
       const status = stringStatusMap[stateStr];
       if (status) {
-        return {
-          externalMessageId: String(statusEvent.MessageIDs[0]),
-          status,
-          timestamp: tsToDate(statusEvent?.Timestamp),
-        };
+        // Em campanhas/lotes o provider agrupa vários ids no mesmo ack:
+        // emite um StatusUpdate por id, senão só o primeiro seria atualizado.
+        return statusEvent.MessageIDs.filter(Boolean).map(
+          (id: unknown): StatusUpdate => ({
+            externalMessageId: String(id),
+            status,
+            timestamp: tsToDate(statusEvent?.Timestamp),
+          }),
+        );
       }
     }
 
@@ -198,34 +202,38 @@ export class UazapiMessageMapper {
       const status =
         numeric !== undefined ? numericAckMap[numeric] : stringStatusMap[stateStr];
       if (status) {
-        return {
-          externalMessageId: String(bMsg.messageid || bMsg.id),
-          status,
-          timestamp: tsToDate(bMsg.timestamp || bMsg.messageTimestamp),
-        };
+        return [
+          {
+            externalMessageId: String(bMsg.messageid || bMsg.id),
+            status,
+            timestamp: tsToDate(bMsg.timestamp || bMsg.messageTimestamp),
+          },
+        ];
       }
     }
 
     // Shape C
     if (Array.isArray(event?.messages)) {
-      const first = event.messages.find((m: any) => m?.id && (m.ack != null || m.status));
-      if (first) {
-        const numeric = typeof first.ack === 'number' ? first.ack : undefined;
+      const updates: StatusUpdate[] = [];
+      for (const m of event.messages) {
+        if (!m?.id || (m.ack == null && !m.status)) continue;
+        const numeric = typeof m.ack === 'number' ? m.ack : undefined;
         const status =
           numeric !== undefined
             ? numericAckMap[numeric]
-            : stringStatusMap[String(first.status || '').toLowerCase()];
+            : stringStatusMap[String(m.status || '').toLowerCase()];
         if (status) {
-          return {
-            externalMessageId: String(first.id),
+          updates.push({
+            externalMessageId: String(m.id),
             status,
-            timestamp: tsToDate(first.timestamp),
-          };
+            timestamp: tsToDate(m.timestamp),
+          });
         }
       }
+      if (updates.length) return updates;
     }
 
-    return null;
+    return [];
   }
 
   denormalize(

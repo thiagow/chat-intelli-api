@@ -124,6 +124,7 @@ model User {
   inboxViews            InboxView[]
   conversationReads     ConversationRead[]
   assignedCards         Card[]             @relation("CardAssignee")
+  createdCampaigns      Campaign[]         @relation("CampaignCreator")
 
   @@map("users")
 }
@@ -182,55 +183,57 @@ model Organization {
 
   // ─── Dados cadastrais da empresa ────────────────
   /// Razão social (ex: "Acme Corp LTDA")
-  legalName String? @map("legal_name")
+  legalName         String? @map("legal_name")
   /// Nome comercial (ex: "Acme")
-  tradeName String? @map("trade_name")
+  tradeName         String? @map("trade_name")
   /// CNPJ
-  document String?
+  document          String?
   /// Email de contato da empresa
-  email String?
+  email             String?
   /// Telefone de contato
-  phone String?
+  phone             String?
   /// Site/URL da empresa
-  website String?
+  website           String?
   /// Endereço: CEP
-  addressZip String? @map("address_zip")
+  addressZip        String? @map("address_zip")
   /// Endereço: rua
-  addressStreet String? @map("address_street")
+  addressStreet     String? @map("address_street")
   /// Endereço: número
-  addressNumber String? @map("address_number")
+  addressNumber     String? @map("address_number")
   /// Endereço: complemento
   addressComplement String? @map("address_complement")
   /// Endereço: bairro
-  addressDistrict String? @map("address_district")
+  addressDistrict   String? @map("address_district")
   /// Endereço: cidade
-  addressCity String? @map("address_city")
+  addressCity       String? @map("address_city")
   /// Endereço: estado
-  addressState String? @map("address_state")
+  addressState      String? @map("address_state")
   /// Endereço: país
-  addressCountry String? @map("address_country")
+  addressCountry    String? @map("address_country")
 
-  members       UserOrganization[]
-  channels      Channel[]
-  contacts      Contact[]
-  conversations Conversation[]
-  departments   Department[]
-  chatbotFlows  ChatbotFlow[]
-  quickReplies  QuickReply[]
-  tags          Tag[]
-  notifications Notification[]
-  invitations   Invitation[]
-  apiKeys       ApiKey[]
-  aiAgents      AiAgent[]
-  aiTools       AiTool[]
-  aiSkills      AiSkill[]
-  inboxViews    InboxView[]
-  pipelines     Pipeline[]
-  cards         Card[]
-  products      Product[]
-  segments      Segment[]
-  projects      Project[]
-  knowledgeSources KnowledgeSource[]
+  members            UserOrganization[]
+  channels           Channel[]
+  contacts           Contact[]
+  conversations      Conversation[]
+  departments        Department[]
+  chatbotFlows       ChatbotFlow[]
+  quickReplies       QuickReply[]
+  tags               Tag[]
+  notifications      Notification[]
+  invitations        Invitation[]
+  apiKeys            ApiKey[]
+  aiAgents           AiAgent[]
+  aiTools            AiTool[]
+  aiSkills           AiSkill[]
+  inboxViews         InboxView[]
+  pipelines          Pipeline[]
+  cards              Card[]
+  products           Product[]
+  segments           Segment[]
+  projects           Project[]
+  knowledgeSources   KnowledgeSource[]
+  campaigns          Campaign[]
+  campaignRecipients CampaignRecipient[]
 
   @@map("organizations")
 }
@@ -312,6 +315,7 @@ model Channel {
   aiAgentChannels    AiAgentChannel[]
   segmentMemberships SegmentChannel[]
   primaryOfSegments  Segment[]            @relation("SegmentPrimaryChannel")
+  campaigns          Campaign[]
 
   @@index([organizationId, type], name: "idx_channel_org_type")
   @@map("channels")
@@ -488,12 +492,18 @@ model Contact {
   updatedAt      DateTime  @updatedAt @map("updated_at")
   deletedAt      DateTime? @map("deleted_at")
 
-  organization  Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  channels      ContactChannel[]
-  conversations Conversation[]
-  tags          ContactTag[]
-  aiMemories    AiAgentMemory[]
-  cards         Card[]           @relation("CardContact")
+  /// Opt-out de mensagens ativas (campanhas): setado quando o contato responde
+  /// SAIR/PARAR etc. Exclui da importação e dos lotes futuros da org.
+  marketingOptOutAt     DateTime? @map("marketing_opt_out_at")
+  marketingOptOutSource String?   @map("marketing_opt_out_source")
+
+  campaignRecipients CampaignRecipient[]
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channels           ContactChannel[]
+  conversations      Conversation[]
+  tags               ContactTag[]
+  aiMemories         AiAgentMemory[]
+  cards              Card[]              @relation("CardContact")
 
   @@index([organizationId, phone], name: "idx_contact_org_phone")
   @@index([organizationId, email], name: "idx_contact_org_email")
@@ -519,31 +529,31 @@ model ContactChannel {
 // ─── Conversations ───────────────────────────────
 
 model Conversation {
-  id              String             @id @default(cuid())
-  organizationId  String             @map("organization_id")
-  channelId       String             @map("channel_id")
+  id               String             @id @default(cuid())
+  organizationId   String             @map("organization_id")
+  channelId        String             @map("channel_id")
   // Quando setado, a conversa pertence a um Segmento (apenas grupos).
   // channelId continua sendo o canal PRINCIPAL do segmento (usado p/ envio,
   // RBAC, realtime). segmentId serve para localizar/deduplicar a conversa de
   // grupo entre os vários canais membros via (segmentId, group_JID).
-  segmentId       String?            @map("segment_id")
+  segmentId        String?            @map("segment_id")
   // Canais baseados em thread (GMAIL): id do thread no provider. Permite
   // 1 conversa por thread de email em vez de 1 por contato — canais de
   // chat (WhatsApp/IG) deixam NULL e continuam chaveando por contato.
-  externalThreadId String?           @map("external_thread_id")
-  contactId       String             @map("contact_id")
-  assignedToId    String?            @map("assigned_to_id")
-  departmentId    String?            @map("department_id")
-  status          ConversationStatus @default(PENDING)
-  subject         String?
-  protocol        String?
-  isGroup         Boolean            @default(false) @map("is_group")
-  lastMessageAt   DateTime?          @map("last_message_at")
-  firstResponseAt DateTime?          @map("first_response_at")
-  closedAt        DateTime?          @map("closed_at")
-  reopenedAt      DateTime?          @map("reopened_at")
-  reopenedCount   Int                @default(0) @map("reopened_count")
-  deletedAt       DateTime?          @map("deleted_at")
+  externalThreadId String?            @map("external_thread_id")
+  contactId        String             @map("contact_id")
+  assignedToId     String?            @map("assigned_to_id")
+  departmentId     String?            @map("department_id")
+  status           ConversationStatus @default(PENDING)
+  subject          String?
+  protocol         String?
+  isGroup          Boolean            @default(false) @map("is_group")
+  lastMessageAt    DateTime?          @map("last_message_at")
+  firstResponseAt  DateTime?          @map("first_response_at")
+  closedAt         DateTime?          @map("closed_at")
+  reopenedAt       DateTime?          @map("reopened_at")
+  reopenedCount    Int                @default(0) @map("reopened_count")
+  deletedAt        DateTime?          @map("deleted_at")
 
   // ─── Archive state ──────────────────────────────
   // Orthogonal to `status` — archived conversations are hidden from the
@@ -598,14 +608,14 @@ model Conversation {
   reads            ConversationRead[]
   cards            Card[]                 @relation("CardConversation")
 
+  // NULLs são distintos no Postgres → não afeta canais de chat.
+  @@unique([channelId, externalThreadId], name: "uq_conv_channel_thread", map: "uq_conv_channel_thread")
   @@index([organizationId, status], name: "idx_conv_org_status")
   @@index([organizationId, assignedToId], name: "idx_conv_org_agent")
   @@index([organizationId, channelId], name: "idx_conv_org_channel")
   @@index([organizationId, isArchived], name: "idx_conv_org_archived")
   @@index([segmentId, contactId], name: "idx_conv_segment_contact")
   @@index([contactId], name: "idx_conv_contact")
-  // NULLs são distintos no Postgres → não afeta canais de chat.
-  @@unique([channelId, externalThreadId], name: "uq_conv_channel_thread", map: "uq_conv_channel_thread")
   @@index([lastMessageAt], name: "idx_conv_last_msg")
   @@map("conversations")
 }
@@ -1011,14 +1021,14 @@ model AiAgent {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  channels       AiAgentChannel[]
-  memories       AiAgentMemory[]
-  runs           AiAgentRun[]
-  handoffsFrom   AiAgentHandoff[]  @relation("HandoffFrom")
-  handoffsTo     AiAgentHandoff[]  @relation("HandoffTo")
-  pendingActions AiPendingAction[]
-  activeOn       Conversation[]    @relation("ActiveAgent")
-  skills         AiAgentSkill[]
+  channels         AiAgentChannel[]
+  memories         AiAgentMemory[]
+  runs             AiAgentRun[]
+  handoffsFrom     AiAgentHandoff[]  @relation("HandoffFrom")
+  handoffsTo       AiAgentHandoff[]  @relation("HandoffTo")
+  pendingActions   AiPendingAction[]
+  activeOn         Conversation[]    @relation("ActiveAgent")
+  skills           AiAgentSkill[]
   knowledgeSources KnowledgeSource[]
 
   @@index([organizationId], name: "idx_ai_agent_org")
@@ -1754,11 +1764,11 @@ model AutomationRun {
 model KnowledgeSource {
   id String @id @default(cuid())
 
-  organizationId String @map("organization_id")
+  organizationId String       @map("organization_id")
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   /// null = documento da organização (vale para todos os agentes)
-  agentId String? @map("agent_id")
+  agentId String?  @map("agent_id")
   agent   AiAgent? @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   /// Título dado pelo usuário
@@ -1771,11 +1781,11 @@ model KnowledgeSource {
   content String @db.Text
 
   /// URL do arquivo PDF (se aplicável)
-  fileUrl String? @map("file_url")
+  fileUrl  String? @map("file_url")
   /// Nome original do arquivo PDF
   fileName String? @map("file_name")
   /// Tamanho do arquivo em bytes
-  fileSize Int? @map("file_size")
+  fileSize Int?    @map("file_size")
 
   /// Status da ingestão/processamento
   status KnowledgeStatus @default(PENDING)
@@ -1786,12 +1796,175 @@ model KnowledgeSource {
   /// Número de chunks criados após processamento
   chunkCount Int? @map("chunk_count")
 
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([organizationId], name: "idx_knowledge_org")
   @@index([agentId], name: "idx_knowledge_agent")
   @@index([status], name: "idx_knowledge_status")
   @@index([organizationId, agentId], name: "idx_knowledge_org_agent")
   @@map("knowledge_sources")
+}
+
+// ─── Campanhas de envio em massa (WhatsApp / UaZAPI) ─────────────
+
+enum CampaignStatus {
+  DRAFT
+  VALIDATING
+  READY
+  SUBMITTING
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum CampaignReplyRouting {
+  CHANNEL_DEFAULT
+  AI
+  HUMAN
+}
+
+enum CampaignConsentSource {
+  CLIENTES_ATIVOS
+  LEADS_INBOUND
+  PARCEIROS
+  OUTRO
+}
+
+enum CampaignBatchStatus {
+  PLANNED
+  SUBMITTING
+  SCHEDULED
+  RUNNING
+  DONE
+  CANCELLED
+  FAILED
+}
+
+enum CampaignRecipientStatus {
+  PENDING
+  INVALID
+  DUPLICATE
+  OPTED_OUT
+  NOT_ON_WHATSAPP
+  VALID
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  CANCELLED
+}
+
+model Campaign {
+  id             String         @id @default(cuid())
+  organizationId String         @map("organization_id")
+  channelId      String         @map("channel_id")
+  createdById    String?        @map("created_by_id")
+  name           String
+  status         CampaignStatus @default(DRAFT)
+
+  // Intervalo randômico entre envios (segundos), executado pela fila da UaZAPI.
+  delayMinSec Int       @default(30) @map("delay_min_sec")
+  delayMaxSec Int       @default(90) @map("delay_max_sec")
+  scheduledAt DateTime? @map("scheduled_at")
+
+  replyRouting    CampaignReplyRouting @default(CHANNEL_DEFAULT) @map("reply_routing")
+  replyWindowDays Int                  @default(7) @map("reply_window_days")
+
+  // Proteção do número: teto diário, janela e dias de envio.
+  dailyCap           Int     @default(200) @map("daily_cap")
+  sendWindowStart    String  @default("09:00") @map("send_window_start")
+  sendWindowEnd      String  @default("18:00") @map("send_window_end")
+  sendWeekdays       Int[]   @default([1, 2, 3, 4, 5]) @map("send_weekdays")
+  maxFailureRatePct  Int     @default(15) @map("max_failure_rate_pct")
+  appendOptOutFooter Boolean @default(true) @map("append_opt_out_footer")
+
+  // Origem da lista (LGPD).
+  consentSource CampaignConsentSource @map("consent_source")
+  consentNote   String?               @map("consent_note")
+
+  autoPausedReason String? @map("auto_paused_reason")
+  sourceFileName   String? @map("source_file_name")
+  /// Contadores derivados — sempre recalculados por groupBy, nunca incrementados.
+  stats            Json    @default("{}")
+  errorMessage     String? @map("error_message")
+
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      Channel             @relation(fields: [channelId], references: [id])
+  createdBy    User?               @relation("CampaignCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  batches      CampaignBatch[]
+  recipients   CampaignRecipient[]
+
+  @@index([organizationId, status], name: "idx_campaign_org_status")
+  @@index([channelId, status], name: "idx_campaign_channel_status")
+  @@map("campaigns")
+}
+
+model CampaignBatch {
+  id               String              @id @default(cuid())
+  campaignId       String              @map("campaign_id")
+  batchIndex       Int                 @map("batch_index")
+  scheduledFor     DateTime            @map("scheduled_for")
+  status           CampaignBatchStatus @default(PLANNED)
+  providerFolderId String?             @unique @map("provider_folder_id")
+  recipientCount   Int                 @default(0) @map("recipient_count")
+  submittedAt      DateTime?           @map("submitted_at")
+  completedAt      DateTime?           @map("completed_at")
+  createdAt        DateTime            @default(now()) @map("created_at")
+
+  campaign   Campaign            @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  recipients CampaignRecipient[]
+
+  @@unique([campaignId, batchIndex], name: "uq_campaign_batch_index")
+  @@map("campaign_batches")
+}
+
+model CampaignRecipient {
+  id                String                  @id @default(cuid())
+  campaignId        String                  @map("campaign_id")
+  organizationId    String                  @map("organization_id")
+  rowNumber         Int                     @map("row_number")
+  rawPhone          String                  @map("raw_phone")
+  phoneE164         String?                 @map("phone_e164")
+  jid               String?
+  companyName       String                  @map("company_name")
+  messageText       String                  @map("message_text") @db.Text
+  /// Texto final enviado (placeholder + rodapé). Usado no matching do echo.
+  renderedText      String?                 @map("rendered_text") @db.Text
+  status            CampaignRecipientStatus @default(PENDING)
+  invalidReason     String?                 @map("invalid_reason")
+  batchId           String?                 @map("batch_id")
+  contactId         String?                 @map("contact_id")
+  conversationId    String?                 @map("conversation_id")
+  messageId         String?                 @map("message_id")
+  providerMessageId String?                 @map("provider_message_id")
+  error             String?
+  sentAt            DateTime?               @map("sent_at")
+  deliveredAt       DateTime?               @map("delivered_at")
+  readAt            DateTime?               @map("read_at")
+  repliedAt         DateTime?               @map("replied_at")
+  createdAt         DateTime                @default(now()) @map("created_at")
+  updatedAt         DateTime                @updatedAt @map("updated_at")
+
+  campaign     Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  batch        CampaignBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  contact      Contact?       @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@unique([campaignId, phoneE164], name: "uq_campaign_recipient_phone")
+  @@index([campaignId, status], name: "idx_campaign_recipient_status")
+  @@index([providerMessageId], name: "idx_campaign_recipient_provider_msg")
+  @@index([contactId, status], name: "idx_campaign_recipient_contact")
+  @@index([batchId], name: "idx_campaign_recipient_batch")
+  @@map("campaign_recipients")
 }

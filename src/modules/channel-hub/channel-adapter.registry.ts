@@ -3,6 +3,7 @@ import { ChannelType } from '@prisma/client';
 import { InboundChannelPort } from './ports/inbound-channel.port';
 import { OutboundChannelPort } from './ports/outbound-channel.port';
 import { HistorySyncPort } from './ports/history-sync.port';
+import { BulkSenderPort } from './ports/bulk-sender.port';
 
 @Injectable()
 export class ChannelAdapterRegistry {
@@ -10,6 +11,7 @@ export class ChannelAdapterRegistry {
   private inboundAdapters = new Map<ChannelType, InboundChannelPort>();
   private outboundAdapters = new Map<ChannelType, OutboundChannelPort>();
   private historySyncAdapters = new Map<ChannelType, HistorySyncPort>();
+  private bulkSenderAdapters = new Map<ChannelType, BulkSenderPort>();
 
   register(
     inbound: InboundChannelPort,
@@ -24,6 +26,19 @@ export class ChannelAdapterRegistry {
   registerHistorySync(adapter: HistorySyncPort): void {
     this.historySyncAdapters.set(adapter.channelType, adapter);
     this.logger.log(`HistorySync adapter registered: ${adapter.channelType}`);
+  }
+
+  registerBulkSender(adapter: BulkSenderPort): void {
+    this.bulkSenderAdapters.set(adapter.channelType, adapter);
+    this.logger.log(`BulkSender adapter registered: ${adapter.channelType}`);
+  }
+
+  getBulkSender(type: ChannelType): BulkSenderPort | null {
+    return this.bulkSenderAdapters.get(type) ?? null;
+  }
+
+  hasBulkSender(type: ChannelType): boolean {
+    return this.bulkSenderAdapters.has(type);
   }
 
   getInbound(type: ChannelType): InboundChannelPort {

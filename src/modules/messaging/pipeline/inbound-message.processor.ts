@@ -17,6 +17,7 @@ import { TranscriptionService } from '../messages/transcription.service';
 import { OutboxService } from '../../automations/outbox/outbox.service';
 import { WatchdogService } from '../../routing/watchdog/watchdog.service';
 import { SalesRecoveryService } from '../../sales-recovery/sales-recovery.service';
+import { CampaignTrackingService } from '../../campaigns/tracking/campaign-tracking.service';
 import {
   AutomationTrigger,
   ChannelType,
@@ -100,6 +101,7 @@ export class InboundMessageProcessor extends WorkerHost {
     private readonly outbox: OutboxService,
     private readonly watchdog: WatchdogService,
     private readonly salesRecovery: SalesRecoveryService,
+    private readonly campaignTracking: CampaignTrackingService,
     @InjectQueue('chatbot-processor') private readonly chatbotQueue: Queue,
   ) {
     super();
@@ -129,6 +131,37 @@ export class InboundMessageProcessor extends WorkerHost {
 
       const { contactId, isNew: isNewContact } =
         await this.contactResolver.resolve(organizationId, channelId, message);
+
+      // Campanhas: o echo (fromMe) da 1ª mensagem de uma campanha é só
+      // rastreado no recipient — NÃO cria conversa (inbox limpo). Só consome
+      // quando casa contato + texto renderizado; mensagem de atendente ou do
+      // celular segue o fluxo normal.
+      const msgContent = (message.content ?? {}) as Record<string, any>;
+      const msgText: string | null =
+        typeof msgContent.text === 'string'
+          ? msgContent.text
+          : typeof msgContent.caption === 'string'
+            ? msgContent.caption
+            : null;
+      if (message.isEcho) {
+        const consumed = await this.campaignTracking
+          .tryConsumeEcho({
+            organizationId,
+            channelId,
+            contactId,
+            externalMessageId: message.externalMessageId,
+            text: msgText,
+            timestamp: message.timestamp,
+          })
+          .catch((err) => {
+            this.logger.warn(`Campaign echo hook falhou: ${err.message}`);
+            return false;
+          });
+        if (consumed) {
+          if (webhookEventId) await this.webhookEvents.markProcessed(webhookEventId);
+          return { skipped: true, reason: 'campaign_echo' };
+        }
+      }
 
       if (message.channelType === ChannelType.INSTAGRAM) {
         const [channel, contact] = await Promise.all([
@@ -193,7 +226,12 @@ export class InboundMessageProcessor extends WorkerHost {
         }
       }
 
-      const { conversationId, status } = await this.conversationResolver.resolve(
+      const {
+        conversationId,
+        status,
+        isNew: conversationIsNew,
+        wasReopened: conversationWasReopened,
+      } = await this.conversationResolver.resolve(
         organizationId,
         channelId,
         contactId,
@@ -207,6 +245,19 @@ export class InboundMessageProcessor extends WorkerHost {
             }
           : undefined,
       );
+
+      if (!message.isEcho) {
+        // Resposta a uma campanha: materializa a mensagem da campanha na
+        // conversa, aplica o roteamento (IA/humano) e trata opt-out.
+        await this.campaignTracking.onInbound({
+          organizationId,
+          channelId,
+          contactId,
+          conversationId,
+          conversationIsFresh: conversationIsNew || conversationWasReopened,
+          text: msgText,
+        });
+      }
 
       const isEcho = !!message.isEcho;
       const direction = isEcho
@@ -730,9 +781,33 @@ export class InboundMessageProcessor extends WorkerHost {
       return this.processInstagramReadWatermark(channelId, status, webhookEventId);
     }
 
+    // Escopo por canal (e org, quando conhecida): external ids são do provider
+    // e podem colidir entre tenants/canais; sem isso um ack de um canal poderia
+    // atualizar a mensagem de outro.
     const message = await this.prisma.message.findFirst({
-      where: { externalId: status.externalMessageId },
+      where: {
+        externalId: status.externalMessageId,
+        conversation: {
+          channelId,
+          ...(data.organizationId && { organizationId: data.organizationId }),
+        },
+      },
     });
+    // Mensagens de campanha: o recipient também acompanha entregue/lido
+    // (antes da resposta não existe Message; depois ela existe e os dois
+    // precisam andar juntos).
+    await this.campaignTracking
+      .applyStatus({
+        channelId,
+        organizationId: data.organizationId,
+        providerMessageId: status.externalMessageId,
+        status: dbStatus,
+        timestamp: status.timestamp,
+      })
+      .catch((err) =>
+        this.logger.warn(`Campaign status hook falhou: ${err.message}`),
+      );
+
     if (!message) return;
 
     const updateData: Record<string, any> = {

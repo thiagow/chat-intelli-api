@@ -12,6 +12,8 @@ import { ZappfySyncAdapter } from './adapters/zappfy/zappfy.sync-adapter';
 import { UazapiModule } from './adapters/uazapi/uazapi.module';
 import { UazapiInboundAdapter } from './adapters/uazapi/uazapi.inbound-adapter';
 import { UazapiOutboundAdapter } from './adapters/uazapi/uazapi.outbound-adapter';
+import { UazapiBulkSenderAdapter } from './adapters/uazapi/uazapi.bulk-sender.adapter';
+import { CAMPAIGNS_QUEUE } from '../campaigns/campaigns.constants';
 import { UazapiSyncAdapter } from './adapters/uazapi/uazapi.sync-adapter';
 import { WhatsAppOfficialModule } from './adapters/whatsapp-official/whatsapp-official.module';
 import { WhatsAppOfficialInboundAdapter } from './adapters/whatsapp-official/whatsapp-official.inbound-adapter';
@@ -42,6 +44,7 @@ import { AvatarHydrationModule } from './avatars/avatar-hydration.module';
       { name: 'conversation-router' },
       { name: 'sla-timers' },
       { name: CHANNEL_SYNC_QUEUE },
+      { name: CAMPAIGNS_QUEUE },
     ),
     ZappfyModule,
     UazapiModule,
@@ -81,6 +84,7 @@ export class ChannelHubModule implements OnModuleInit {
     private readonly uazapiInbound: UazapiInboundAdapter,
     private readonly uazapiOutbound: UazapiOutboundAdapter,
     private readonly uazapiSync: UazapiSyncAdapter,
+    private readonly uazapiBulkSender: UazapiBulkSenderAdapter,
     private readonly waOfficialInbound: WhatsAppOfficialInboundAdapter,
     private readonly waOfficialOutbound: WhatsAppOfficialOutboundAdapter,
     private readonly instagramInbound: InstagramInboundAdapter,
@@ -99,5 +103,6 @@ export class ChannelHubModule implements OnModuleInit {
     this.registry.registerHistorySync(this.zappfySync);
     this.registry.registerHistorySync(this.uazapiSync);
     this.registry.registerHistorySync(this.instagramSync);
+    this.registry.registerBulkSender(this.uazapiBulkSender);
   }
 }

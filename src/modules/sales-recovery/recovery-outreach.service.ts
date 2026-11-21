@@ -11,7 +11,9 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { toWhatsappExternalId } from '../channel-hub/utils/whatsapp-jid';
 import { RecoveryConfigService } from './recovery-config.service';
+import { ContactProvisioningService } from '../channel-hub/utils/contact-provisioning.service';
 
 export interface ResolvedRecoveryContact {
   contactId: string;
@@ -42,19 +44,18 @@ export class RecoveryOutreachService {
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeGateway,
     private readonly config: RecoveryConfigService,
+    private readonly provisioning: ContactProvisioningService,
     @InjectQueue('outbound-messages') private readonly outboundQueue: Queue,
   ) {}
 
   /**
-   * external_id no formato que cada canal usa: Zappfy/baileys usa o JID
+   * external_id no formato que cada canal usa: Zappfy e UaZAPI (baileys/whatsmeow) usam o JID
    * (`<phone>@s.whatsapp.net`); WhatsApp Oficial (Meta) e demais usam só os
    * dígitos. Tem que bater com o que o inbound grava, senão duplica contato.
    */
   private async toExternalId(channelId: string, phone: string): Promise<string> {
     const type = await this.getChannelType(channelId);
-    return type === ChannelType.WHATSAPP_ZAPPFY
-      ? `${phone}@s.whatsapp.net`
-      : phone;
+    return toWhatsappExternalId(type, phone);
   }
 
   private async getChannelType(channelId: string): Promise<ChannelType | null> {
@@ -74,64 +75,8 @@ export class RecoveryOutreachService {
     channelId: string,
     data: { phone: string; name?: string | null; email?: string | null },
   ): Promise<ResolvedRecoveryContact> {
-    const externalId = await this.toExternalId(channelId, data.phone);
-
-    // 1. Já existe vínculo nesse canal?
-    const existingChannel = await this.prisma.contactChannel.findUnique({
-      where: { uq_contact_channel_external: { channelId, externalId } },
-      select: { contactId: true },
-    });
-    if (existingChannel) {
-      return { contactId: existingChannel.contactId, externalId };
-    }
-
-    // 2. Existe um Contact com esse telefone (de outro canal)? Reaproveita.
-    const existingContact = await this.prisma.contact.findFirst({
-      where: { organizationId, phone: data.phone, deletedAt: null },
-      select: { id: true, name: true },
-    });
-
-    try {
-      if (existingContact) {
-        await this.prisma.contactChannel.create({
-          data: {
-            contactId: existingContact.id,
-            channelId,
-            externalId,
-            profileName: data.name ?? undefined,
-          },
-        });
-        return { contactId: existingContact.id, externalId };
-      }
-
-      const contact = await this.prisma.contact.create({
-        data: {
-          organizationId,
-          name: data.name ?? undefined,
-          phone: data.phone,
-          email: data.email ?? undefined,
-          channels: {
-            create: { channelId, externalId, profileName: data.name ?? undefined },
-          },
-        },
-        select: { id: true },
-      });
-      this.logger.log(`Recovery contact criado: ${contact.id} (${data.phone})`);
-      return { contactId: contact.id, externalId };
-    } catch (err) {
-      // Corrida: outro webhook criou o vínculo no meio. Re-busca.
-      if (
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        err.code === 'P2002'
-      ) {
-        const racer = await this.prisma.contactChannel.findUnique({
-          where: { uq_contact_channel_external: { channelId, externalId } },
-          select: { contactId: true },
-        });
-        if (racer) return { contactId: racer.contactId, externalId };
-      }
-      throw err;
-    }
+    const channelType = await this.getChannelType(channelId);
+    return this.provisioning.provision(organizationId, channelId, channelType, data);
   }
 
   /**

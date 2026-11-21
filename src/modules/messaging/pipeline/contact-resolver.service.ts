@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ChannelType } from '@prisma/client';
 import { PrismaService } from '../../../database/prisma.service';
 import { NormalizedInboundMessage } from '../../channel-hub/ports/types';
+import { toWhatsappExternalId } from '../../channel-hub/utils/whatsapp-jid';
 import { IdempotencyService } from './idempotency.service';
 
 export interface ResolvedContact {
@@ -262,7 +263,5 @@ function toExternalContactId(
       'Telefone é obrigatório para iniciar conversa nesse canal.',
     );
   }
-  return channelType === ChannelType.WHATSAPP_ZAPPFY
-    ? `${identifier.phone}@s.whatsapp.net`
-    : identifier.phone;
+  return toWhatsappExternalId(channelType, identifier.phone);
 }

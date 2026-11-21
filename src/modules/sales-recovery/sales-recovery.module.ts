@@ -3,6 +3,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { PipelinesModule } from '../pipelines/pipelines.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { RecoveryConfigService } from './recovery-config.service';
+import { ContactProvisioningService } from '../channel-hub/utils/contact-provisioning.service';
 import { RecoveryCardsRepository } from './recovery-cards.repository';
 import { RecoveryOutreachService } from './recovery-outreach.service';
 import { SalesRecoveryService } from './sales-recovery.service';
@@ -37,6 +38,7 @@ import {
   controllers: [KirvanoWebhookController],
   providers: [
     RecoveryConfigService,
+    ContactProvisioningService,
     RecoveryCardsRepository,
     RecoveryOutreachService,
     SalesRecoveryService,
