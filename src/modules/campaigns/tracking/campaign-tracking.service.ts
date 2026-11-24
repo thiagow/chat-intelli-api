@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import {
   CampaignRecipient,
   CampaignRecipientStatus,
@@ -11,6 +13,7 @@ import {
 import { PrismaService } from '../../../database/prisma.service';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { isOptOutText, sameRenderedText } from '../campaign-text';
+import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS } from '../campaigns.constants';
 
 const RANK: Partial<Record<CampaignRecipientStatus, number>> = {
   QUEUED: 0,
@@ -52,6 +55,7 @@ export class CampaignTrackingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeGateway,
+    @InjectQueue(CAMPAIGNS_QUEUE) private readonly queue: Queue,
   ) {}
 
   /**
@@ -127,7 +131,18 @@ export class CampaignTrackingService {
         repliedAt: null,
         campaign: { channelId: input.channelId, deletedAt: null },
       },
-      include: { campaign: { select: { id: true, replyRouting: true, replyWindowDays: true } } },
+      include: {
+        campaign: {
+          select: {
+            id: true,
+            name: true,
+            replyRouting: true,
+            replyWindowDays: true,
+            onReplyWebhookUrl: true,
+            replyAiContext: true,
+          },
+        },
+      },
       orderBy: { sentAt: 'desc' },
       take: 5,
     });
@@ -141,16 +156,20 @@ export class CampaignTrackingService {
 
     if (input.conversationIsFresh) {
       await this.applyRouting(input.conversationId, recipient.campaign.replyRouting);
+      await this.attachAiContext(input.conversationId, recipient);
     }
 
+    const repliedAt = new Date();
     await this.prisma.campaignRecipient.update({
       where: { id: recipient.id },
       data: {
-        repliedAt: new Date(),
+        repliedAt,
         conversationId: input.conversationId,
         ...(messageId && { messageId }),
+        ...(recipient.campaign.onReplyWebhookUrl && { replyWebhookStatus: 'PENDING' }),
       },
     });
+    await this.enqueueReplyWebhook(recipient, input.text, repliedAt);
     this.realtime.emitToOrg(input.organizationId, 'campaign:reply', {
       campaignId: recipient.campaignId,
       recipientId: recipient.id,
@@ -198,6 +217,60 @@ export class CampaignTrackingService {
         return existing?.id ?? null;
       }
       throw err;
+    }
+  }
+
+  /**
+   * Handoff para a IA: guarda o contexto da campanha na conversa (`metadata.campaign`). O prompt de produção
+   * (`prompt-builder.service.ts`) injeta esse bloco, então a IA sabe o que foi ofertado na prospecção.
+   * A mensagem enviada também já está no histórico (materializeCampaignMessage).
+   */
+  private async attachAiContext(
+    conversationId: string,
+    recipient: CampaignRecipient & { campaign: { id: string; name: string; replyAiContext: string | null } },
+  ): Promise<void> {
+    const aiContext = recipient.campaign.replyAiContext?.trim();
+    if (!aiContext) return;
+    const conv = await this.prisma.conversation.findUnique({ where: { id: conversationId }, select: { metadata: true } });
+    const metadata = ((conv?.metadata ?? {}) as Record<string, unknown>) || {};
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: {
+        metadata: {
+          ...metadata,
+          campaign: {
+            id: recipient.campaign.id,
+            name: recipient.campaign.name,
+            aiContext,
+            sentText: recipient.renderedText,
+            companyName: recipient.companyName,
+          },
+        } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  /** Webhook assíncrono (fila `campaigns`, 5 tentativas com backoff). Falha ao enfileirar nunca derruba o inbound. */
+  private async enqueueReplyWebhook(
+    recipient: { id: string; campaign: { onReplyWebhookUrl: string | null } },
+    replyText: string | null,
+    repliedAt: Date,
+  ): Promise<void> {
+    if (!recipient.campaign.onReplyWebhookUrl) return;
+    try {
+      await this.queue.add(
+        CAMPAIGN_JOBS.REPLY_WEBHOOK,
+        { recipientId: recipient.id, replyText, repliedAt: repliedAt.toISOString() },
+        {
+          jobId: `reply-webhook-${recipient.id}`, // uma entrega por destinatário
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 30_000 },
+          removeOnComplete: true,
+          removeOnFail: 500,
+        },
+      );
+    } catch (err: any) {
+      this.logger.error(`Falha ao enfileirar reply-webhook (${recipient.id}): ${err.message}`);
     }
   }
 

@@ -1895,6 +1895,11 @@ model Campaign {
   maxFailureRatePct  Int     @default(15) @map("max_failure_rate_pct")
   appendOptOutFooter Boolean @default(true) @map("append_opt_out_footer")
 
+  // Resposta do contato: webhook assíncrono (HMAC) + contexto injetado na IA que assume a conversa.
+  onReplyWebhookUrl    String? @map("on_reply_webhook_url")
+  onReplyWebhookSecret String? @map("on_reply_webhook_secret")
+  replyAiContext       String? @map("reply_ai_context") @db.Text
+
   // Origem da lista (LGPD).
   consentSource CampaignConsentSource @map("consent_source")
   consentNote   String?               @map("consent_note")
@@ -1967,6 +1972,11 @@ model CampaignRecipient {
   deliveredAt       DateTime?               @map("delivered_at")
   readAt            DateTime?               @map("read_at")
   repliedAt         DateTime?               @map("replied_at")
+  /// Entrega do webhook de resposta: PENDING | SENT | FAILED.
+  replyWebhookStatus   String?   @map("reply_webhook_status")
+  replyWebhookAttempts Int       @default(0) @map("reply_webhook_attempts")
+  replyWebhookError    String?   @map("reply_webhook_error")
+  replyWebhookAt       DateTime? @map("reply_webhook_at")
   createdAt         DateTime                @default(now()) @map("created_at")
   updatedAt         DateTime                @updatedAt @map("updated_at")
 

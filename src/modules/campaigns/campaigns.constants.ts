@@ -6,6 +6,7 @@ export const CAMPAIGN_JOBS = {
   WINDOW_GUARD: 'window-guard',
   RECONCILE: 'reconcile',
   SENDER_EVENT: 'sender-event',
+  REPLY_WEBHOOK: 'reply-webhook',
 } as const;
 
 /** Palavras que, em match exato (normalizado), contam como opt-out. */

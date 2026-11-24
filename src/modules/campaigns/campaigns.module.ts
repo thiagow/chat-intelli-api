@@ -6,6 +6,7 @@ import { CampaignsController } from './campaigns.controller';
 import { CampaignsService } from './campaigns.service';
 import { CampaignsEngine } from './campaigns.engine';
 import { CampaignsProcessor } from './campaigns.processor';
+import { ReplyWebhookService } from './reply-webhook.service';
 import { CAMPAIGNS_QUEUE } from './campaigns.constants';
 
 /**
@@ -16,6 +17,6 @@ import { CAMPAIGNS_QUEUE } from './campaigns.constants';
 @Module({
   imports: [BullModule.registerQueue({ name: CAMPAIGNS_QUEUE }), ChannelHubModule],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignsEngine, CampaignsProcessor, ContactProvisioningService],
+  providers: [CampaignsService, CampaignsEngine, CampaignsProcessor, ReplyWebhookService, ContactProvisioningService],
 })
 export class CampaignsModule {}

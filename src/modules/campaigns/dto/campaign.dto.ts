@@ -138,6 +138,18 @@ export class UpdateCampaignDto {
   @Max(CAMPAIGN_LIMITS.maxBatchPauseSec)
   batchPauseMaxSec?: number;
 
+  @ApiPropertyOptional({ description: 'URL https chamada (POST assinado) quando o contato responde. Vazio/null remove.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  onReplyWebhookUrl?: string | null;
+
+  @ApiPropertyOptional({ description: 'Contexto da campanha injetado na IA que assume a conversa após a resposta' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  replyAiContext?: string | null;
+
   @ApiPropertyOptional({ example: '09:00' })
   @IsOptional()
   @Matches(HM)

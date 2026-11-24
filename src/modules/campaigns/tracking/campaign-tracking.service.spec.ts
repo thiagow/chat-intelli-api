@@ -13,7 +13,9 @@ function build(overrides: Record<string, any> = {}) {
     ...overrides,
   };
   const realtime: any = { emitToOrg: jest.fn() };
-  return { svc: new CampaignTrackingService(prisma, realtime), prisma, realtime };
+  const queue: any = { add: jest.fn().mockResolvedValue({}) };
+  prisma.conversation.findUnique = jest.fn().mockResolvedValue({ metadata: { existente: true } });
+  return { svc: new CampaignTrackingService(prisma, realtime, queue), prisma, realtime, queue };
 }
 
 const echo = (text: string | null, extra: Record<string, any> = {}) => ({
@@ -111,6 +113,77 @@ describe('CampaignTrackingService.onInbound', () => {
       where: { id: 'r1' },
       data: expect.objectContaining({ conversationId: 'conv1', messageId: 'msg1', repliedAt: expect.any(Date) }),
     });
+  });
+
+  it('com webhook configurado: marca PENDING e enfileira UMA entrega (jobId por destinatário, 5 tentativas)', async () => {
+    const { svc, prisma, queue } = build();
+    prisma.campaignRecipient.findMany.mockResolvedValue([
+      sent({ campaign: { id: 'cmp1', name: 'Black', replyRouting: 'AI', replyWindowDays: 7, onReplyWebhookUrl: 'https://hooks.exemplo.com/x', replyAiContext: null } }),
+    ]);
+    await svc.onInbound(input('Tenho interesse'));
+    expect(prisma.campaignRecipient.update).toHaveBeenCalledWith({
+      where: { id: 'r1' },
+      data: expect.objectContaining({ replyWebhookStatus: 'PENDING' }),
+    });
+    expect(queue.add).toHaveBeenCalledWith(
+      'reply-webhook',
+      { recipientId: 'r1', replyText: 'Tenho interesse', repliedAt: expect.any(String) },
+      expect.objectContaining({ jobId: 'reply-webhook-r1', attempts: 5 }),
+    );
+  });
+
+  it('sem webhook configurado nada é enfileirado', async () => {
+    const { svc, queue } = build();
+    const { prisma } = { prisma: (svc as any).prisma };
+    prisma.campaignRecipient.findMany.mockResolvedValue([sent()]);
+    await svc.onInbound(input('oi'));
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  it('falha ao enfileirar o webhook nunca derruba o inbound nem a marcação de respondida', async () => {
+    const { svc, prisma, queue } = build();
+    queue.add.mockRejectedValue(new Error('redis down'));
+    prisma.campaignRecipient.findMany.mockResolvedValue([
+      sent({ campaign: { id: 'cmp1', name: 'B', replyRouting: 'AI', replyWindowDays: 7, onReplyWebhookUrl: 'https://hooks.exemplo.com/x', replyAiContext: null } }),
+    ]);
+    await expect(svc.onInbound(input('oi'))).resolves.toBeUndefined();
+    expect(prisma.campaignRecipient.update).toHaveBeenCalledWith({
+      where: { id: 'r1' },
+      data: expect.objectContaining({ repliedAt: expect.any(Date) }),
+    });
+  });
+
+  it('contexto de IA: conversa nova recebe metadata.campaign (preservando o que já existia)', async () => {
+    const { svc, prisma } = build();
+    prisma.campaignRecipient.findMany.mockResolvedValue([
+      sent({
+        renderedText: 'Oi Acme!',
+        companyName: 'Acme',
+        campaign: { id: 'cmp1', name: 'Black', replyRouting: 'AI', replyWindowDays: 7, onReplyWebhookUrl: null, replyAiContext: '  Ofereça demo de 15 min.  ' },
+      }),
+    ]);
+    await svc.onInbound(input('quero saber mais'));
+    const call = prisma.conversation.update.mock.calls.find((c: any[]) => c[0].data.metadata);
+    expect(call[0].data.metadata).toEqual({
+      existente: true,
+      campaign: { id: 'cmp1', name: 'Black', aiContext: 'Ofereça demo de 15 min.', sentText: 'Oi Acme!', companyName: 'Acme' },
+    });
+  });
+
+  it('contexto de IA não é gravado em conversa já existente (não nova) nem sem contexto configurado', async () => {
+    const a = build();
+    a.prisma.campaignRecipient.findMany.mockResolvedValue([
+      sent({ campaign: { id: 'c', name: 'B', replyRouting: 'AI', replyWindowDays: 7, onReplyWebhookUrl: null, replyAiContext: 'ctx' } }),
+    ]);
+    await a.svc.onInbound(input('oi', false));
+    expect(a.prisma.conversation.update).not.toHaveBeenCalled();
+
+    const b = build();
+    b.prisma.campaignRecipient.findMany.mockResolvedValue([
+      sent({ campaign: { id: 'c', name: 'B', replyRouting: 'CHANNEL_DEFAULT', replyWindowDays: 7, onReplyWebhookUrl: null, replyAiContext: null } }),
+    ]);
+    await b.svc.onInbound(input('oi'));
+    expect(b.prisma.conversation.update).not.toHaveBeenCalled();
   });
 
   it('roteamento HUMAN desliga a IA; CHANNEL_DEFAULT não toca; conversa existente não é re-roteada', async () => {

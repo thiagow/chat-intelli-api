@@ -17,6 +17,9 @@ import { normalizePhone } from '../../common/phone/phone-normalizer';
 import { planBatches } from './batching/campaign-batch-planner';
 import { parseCampaignCsv } from './csv/campaign-csv.parser';
 import { extractVariables, renderCampaignMessage } from './campaign-text';
+import { randomBytes } from 'node:crypto';
+import { assertSafeHttpsUrl, UnsafeUrlError } from '../../common/net/safe-fetch';
+import { ReplyWebhookService } from './reply-webhook.service';
 import { CampaignsEngine } from './campaigns.engine';
 import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS, CAMPAIGN_LIMITS } from './campaigns.constants';
 import {
@@ -29,6 +32,14 @@ import {
 
 const EDITABLE: Campaign['status'][] = ['DRAFT', 'VALIDATING', 'READY'];
 
+/** Nunca devolve o segredo do webhook: qualquer membro com acesso ao canal lê a campanha. */
+export function maskCampaign<T extends { onReplyWebhookSecret?: string | null }>(c: T) {
+  const { onReplyWebhookSecret, ...rest } = c;
+  return { ...rest, onReplyWebhookSecretSet: !!onReplyWebhookSecret };
+}
+
+const newWebhookSecret = () => `whsec_${randomBytes(24).toString('hex')}`;
+
 @Injectable()
 export class CampaignsService {
   private readonly logger = new Logger(CampaignsService.name);
@@ -40,6 +51,7 @@ export class CampaignsService {
     private readonly engine: CampaignsEngine,
     private readonly config: ConfigService,
     @InjectQueue(CAMPAIGNS_QUEUE) private readonly queue: Queue,
+    private readonly replyWebhook: ReplyWebhookService,
   ) {}
 
   /** Kill switch (`CAMPAIGNS_ENABLED=false` desliga a criação/início). */
@@ -104,7 +116,7 @@ export class CampaignsService {
       }),
       this.prisma.campaign.count({ where }),
     ]);
-    return { items, total, page, pageSize };
+    return { items: items.map((c) => maskCampaign(c)), total, page, pageSize };
   }
 
   async get(orgId: string, id: string, access: ChannelAccess) {
@@ -114,7 +126,7 @@ export class CampaignsService {
       this.prisma.campaignBatch.findMany({ where: { campaignId: id }, orderBy: { batchIndex: 'asc' } }),
       this.prisma.channel.findUnique({ where: { id: campaign.channelId }, select: { id: true, name: true, type: true } }),
     ]);
-    return { ...campaign, stats, batches, channel, estimate: await this.estimate(campaign) };
+    return { ...maskCampaign(campaign), stats, batches, channel, estimate: await this.estimate(campaign) };
   }
 
   /** Pré-visualização: mesma renderização do envio, com sementes de amostra diferentes. */
@@ -343,7 +355,7 @@ export class CampaignsService {
     const stats = await this.engine.emitProgress(campaign.id);
 
     return {
-      campaign: { ...campaign, stats },
+      campaign: { ...maskCampaign(campaign), stats },
       report: {
         total: drafts.length,
         pending,
@@ -405,9 +417,33 @@ export class CampaignsService {
       throw new UnprocessableEntityException('O agendamento precisa estar no futuro');
     }
 
+    // Webhook de resposta: URL validada contra SSRF ao salvar (e de novo a cada entrega).
+    let webhookPatch: { onReplyWebhookUrl: string | null; onReplyWebhookSecret?: string | null } | null = null;
+    let generatedSecret: string | undefined;
+    if (dto.onReplyWebhookUrl !== undefined) {
+      const raw = (dto.onReplyWebhookUrl ?? '').trim();
+      if (!raw) {
+        webhookPatch = { onReplyWebhookUrl: null, onReplyWebhookSecret: null };
+      } else {
+        try {
+          await assertSafeHttpsUrl(raw);
+        } catch (err) {
+          if (err instanceof UnsafeUrlError) throw new UnprocessableEntityException(`URL do webhook recusada: ${err.message}`);
+          throw err;
+        }
+        webhookPatch = { onReplyWebhookUrl: raw };
+        if (!campaign.onReplyWebhookSecret) {
+          generatedSecret = newWebhookSecret();
+          webhookPatch.onReplyWebhookSecret = generatedSecret;
+        }
+      }
+    }
+
     const updated = await this.prisma.campaign.update({
       where: { id },
       data: {
+        ...(webhookPatch ?? {}),
+        ...(dto.replyAiContext !== undefined && { replyAiContext: dto.replyAiContext?.trim() || null }),
         ...(dto.name !== undefined && { name: dto.name.trim() }),
         ...(dto.delayMinSec !== undefined && { delayMinSec: dto.delayMinSec }),
         ...(dto.delayMaxSec !== undefined && { delayMaxSec: dto.delayMaxSec }),
@@ -429,7 +465,8 @@ export class CampaignsService {
         ...(dto.appendOptOutFooter !== undefined && { appendOptOutFooter: dto.appendOptOutFooter }),
       },
     });
-    return { ...updated, estimate: await this.estimate(updated) };
+    // O segredo só sai UMA vez, na resposta que o gerou (ou na rotação); depois só `onReplyWebhookSecretSet`.
+    return { ...maskCampaign(updated), estimate: await this.estimate(updated), ...(generatedSecret && { webhookSecret: generatedSecret }) };
   }
 
   // ─── Ciclo de vida ─────────────────────────────────────────────────
@@ -564,5 +601,23 @@ export class CampaignsService {
     const n = await this.engine.sendNow(id);
     if (!n) throw new ConflictException('Nenhum lote agendado para antecipar');
     return { batchesStarted: n };
+  }
+
+  /** Gera um novo segredo de assinatura; o valor só é devolvido aqui. */
+  async rotateWebhookSecret(orgId: string, id: string, access: ChannelAccess) {
+    const campaign = await this.getOwned(orgId, id, access);
+    if (!campaign.onReplyWebhookUrl) throw new ConflictException('Configure a URL do webhook antes de gerar o segredo');
+    const secret = newWebhookSecret();
+    await this.prisma.campaign.update({ where: { id }, data: { onReplyWebhookSecret: secret } });
+    return { webhookSecret: secret };
+  }
+
+  /** Dispara um evento de teste assinado para a URL configurada (diagnóstico). */
+  async testWebhook(orgId: string, id: string, access: ChannelAccess) {
+    const campaign = await this.getOwned(orgId, id, access);
+    if (!campaign.onReplyWebhookUrl || !campaign.onReplyWebhookSecret) {
+      throw new ConflictException('Configure a URL do webhook antes de testar');
+    }
+    return this.replyWebhook.sendTest(campaign);
   }
 }

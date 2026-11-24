@@ -117,6 +117,22 @@ export class CampaignsController {
     return this.service.start(orgId, id, access);
   }
 
+  @Post(':id/webhook-secret')
+  @HttpCode(200)
+  @Roles(OrgRole.OWNER, OrgRole.ADMIN)
+  @ApiOperation({ summary: 'Gera novo segredo de assinatura do webhook de resposta (valor devolvido uma única vez)' })
+  rotateWebhookSecret(@Param('id') id: string, @CurrentOrg('id') orgId: string, @CurrentChannelAccess() access: ChannelAccess) {
+    return this.service.rotateWebhookSecret(orgId, id, access);
+  }
+
+  @Post(':id/webhook-test')
+  @HttpCode(200)
+  @Roles(OrgRole.OWNER, OrgRole.ADMIN)
+  @ApiOperation({ summary: 'Envia um evento de teste assinado para a URL do webhook de resposta' })
+  testWebhook(@Param('id') id: string, @CurrentOrg('id') orgId: string, @CurrentChannelAccess() access: ChannelAccess) {
+    return this.service.testWebhook(orgId, id, access);
+  }
+
   @Post(':id/pause')
   @HttpCode(200)
   @Roles(OrgRole.OWNER, OrgRole.ADMIN)

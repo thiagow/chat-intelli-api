@@ -66,6 +66,17 @@ Atualizado em <%= it.operationalContextLabel %>. Use isso pra orientar suas pró
 - Cliente: <%= it.contact.name || 'Sem nome cadastrado' %><% if (it.contact.phone) { %>
 - Telefone: <%= it.contact.phone %><% } %><% if (it.contact.email) { %>
 - E-mail: <%= it.contact.email %><% } %>
+<% const camp = it.conversation && it.conversation.metadata && it.conversation.metadata.campaign; %><% if (camp && camp.aiContext) { %>
+
+═══ Contexto da campanha de prospecção (LEIA ANTES DE RESPONDER) ═══
+Esta conversa começou porque o cliente respondeu a uma mensagem de prospecção enviada pela empresa<% if (camp.name) { %> (campanha "<%= camp.name %>")<% } %>.
+<% if (camp.sentText) { %>Mensagem que enviamos ao cliente:
+"""
+<%= camp.sentText %>
+"""
+<% } %>Instruções da operação para esta conversa:
+<%= camp.aiContext %>
+<% } %>
 <% if (it.memorySummary) { %>
 ═══ Memória de interações anteriores ═══
 <%= it.memorySummary %>

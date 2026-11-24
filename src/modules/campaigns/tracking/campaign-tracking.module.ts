@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
+import { CAMPAIGNS_QUEUE } from '../campaigns.constants';
 import { CampaignTrackingService } from './campaign-tracking.service';
 
 /**
@@ -6,6 +8,8 @@ import { CampaignTrackingService } from './campaign-tracking.service';
  * importar sem criar ciclo com o módulo de campanhas.
  */
 @Module({
+  // Só PRODUTOR da fila: o único @Processor de `campaigns` continua no CampaignsModule.
+  imports: [BullModule.registerQueue({ name: CAMPAIGNS_QUEUE })],
   providers: [CampaignTrackingService],
   exports: [CampaignTrackingService],
 })
