@@ -16,12 +16,14 @@ import { ChannelAccess, ChannelAccessService } from '../iam/channel-access/chann
 import { normalizePhone } from '../../common/phone/phone-normalizer';
 import { planBatches } from './batching/campaign-batch-planner';
 import { parseCampaignCsv } from './csv/campaign-csv.parser';
+import { extractVariables, renderCampaignMessage } from './campaign-text';
 import { CampaignsEngine } from './campaigns.engine';
 import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS, CAMPAIGN_LIMITS } from './campaigns.constants';
 import {
   ImportCampaignDto,
   ListCampaignsQueryDto,
   ListRecipientsQueryDto,
+  PreviewCampaignQueryDto,
   UpdateCampaignDto,
 } from './dto/campaign.dto';
 
@@ -113,6 +115,32 @@ export class CampaignsService {
       this.prisma.channel.findUnique({ where: { id: campaign.channelId }, select: { id: true, name: true, type: true } }),
     ]);
     return { ...campaign, stats, batches, channel, estimate: await this.estimate(campaign) };
+  }
+
+  /** Pré-visualização: mesma renderização do envio, com sementes de amostra diferentes. */
+  async preview(orgId: string, id: string, access: ChannelAccess, q: PreviewCampaignQueryDto) {
+    const campaign = await this.getOwned(orgId, id, access);
+    const sample = await this.prisma.campaignRecipient.findFirst({
+      where: { campaignId: id, organizationId: orgId, status: { in: ['PENDING', 'VALID', 'QUEUED'] } },
+      orderBy: { rowNumber: 'asc' },
+    });
+    if (!sample) return { variations: [], variables: [], sample: null };
+    const footer = q.footer ?? campaign.appendOptOutFooter;
+    const n = q.n ?? 3;
+    const variations = Array.from({ length: n }, (_, i) =>
+      renderCampaignMessage({
+        template: sample.messageText,
+        companyName: sample.companyName,
+        customData: (sample.customData ?? null) as Record<string, string> | null,
+        seed: `preview:${id}:${i}`,
+        appendOptOutFooter: footer,
+      }).text,
+    );
+    return {
+      variations,
+      variables: extractVariables(sample.messageText),
+      sample: { companyName: sample.companyName },
+    };
   }
 
   async recipients(orgId: string, id: string, access: ChannelAccess, q: ListRecipientsQueryDto) {
@@ -227,6 +255,7 @@ export class CampaignsService {
       phoneE164: string | null;
       companyName: string;
       messageText: string;
+      customData: Record<string, string>;
       status: CampaignRecipientStatus;
       invalidReason: string | null;
     };
@@ -237,6 +266,7 @@ export class CampaignsService {
         rawPhone: r.rawPhone.slice(0, 64),
         companyName: r.companyName.slice(0, 200),
         messageText: r.messageText,
+        customData: r.customData,
       };
       const phone = normalizePhone(r.rawPhone);
       if (!phone.ok) {
@@ -245,6 +275,11 @@ export class CampaignsService {
       if (r.error) return { ...base, phoneE164: phone.e164, status: 'INVALID', invalidReason: r.error };
       if (/\{\{\s*empresa\s*\}\}/i.test(r.messageText) && !r.companyName) {
         return { ...base, phoneE164: phone.e164, status: 'INVALID', invalidReason: 'COMPANY_REQUIRED' };
+      }
+      // Variável do modelo sem valor nesta linha: nunca envia "{{cidade}}" cru nem um buraco no texto.
+      const missingVar = extractVariables(r.messageText).find((v) => v !== 'empresa' && !r.customData[v]);
+      if (missingVar) {
+        return { ...base, phoneE164: phone.e164, status: 'INVALID', invalidReason: `VARIABLE_MISSING:${missingVar}`.slice(0, 80) };
       }
       if (seen.has(phone.e164)) {
         return { ...base, phoneE164: null, status: 'DUPLICATE', invalidReason: 'DUPLICATE_IN_FILE' };
@@ -287,6 +322,7 @@ export class CampaignsService {
               phoneE164: d.phoneE164,
               companyName: d.companyName,
               messageText: d.messageText,
+              customData: d.customData,
               status: d.status,
               invalidReason: d.invalidReason,
             })),

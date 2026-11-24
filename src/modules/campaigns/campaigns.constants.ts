@@ -17,6 +17,8 @@ export const CAMPAIGN_LIMITS = {
   maxFileBytes: 5 * 1024 * 1024,
   maxRows: 5000,
   maxMessageChars: 4096,
+  maxExtraColumns: 20,
+  maxExtraValueChars: 500,
   maxDailyCap: 1000,
   /** Lote = uma pasta na UaZAPI; lotes menores espalham melhor o envio. */
   maxBatchSize: 500,

@@ -9,7 +9,7 @@ import { ContactProvisioningService } from '../channel-hub/utils/contact-provisi
 import { phoneMatchKey, stripWhatsappJid } from '../channel-hub/utils/whatsapp-jid';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { planBatches, getZonedParts, zonedToUtc, parseHm, randomInt, randomPauseSec } from './batching/campaign-batch-planner';
-import { renderCampaignText } from './campaign-text';
+import { renderCampaignMessage } from './campaign-text';
 import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS, CAMPAIGN_LIMITS } from './campaigns.constants';
 
 export interface CampaignStats {
@@ -346,7 +346,30 @@ export class CampaignsEngine {
         data: { status: 'OPTED_OUT' },
       });
     }
-    const sendable = recipients.filter((r) => !optedOut.has(r.phoneE164!));
+    const candidates = recipients.filter((r) => !optedOut.has(r.phoneE164!));
+
+    // Texto final por destinatário (variáveis + spintax, determinístico pela semente): o retry gera o
+    // MESMO texto, então o casamento do eco por `renderedText` continua valendo.
+    const rendered = new Map<string, string>();
+    for (const r of candidates) {
+      const out = renderCampaignMessage({
+        template: r.messageText,
+        companyName: r.companyName,
+        customData: (r.customData ?? null) as Record<string, string> | null,
+        seed: `${campaign.id}:${r.id}`,
+        appendOptOutFooter: campaign.appendOptOutFooter,
+      });
+      if (out.missing.length) {
+        // Defesa em profundidade: a importação já invalida a linha; nunca envia texto com buraco.
+        await this.prisma.campaignRecipient.update({
+          where: { id: r.id },
+          data: { status: 'FAILED', error: `VARIABLE_MISSING:${out.missing[0]}`.slice(0, 200) },
+        });
+        continue;
+      }
+      rendered.set(r.id, out.text);
+    }
+    const sendable = candidates.filter((r) => rendered.has(r.id));
 
     if (!sendable.length) {
       await this.prisma.campaignBatch.update({
@@ -380,7 +403,7 @@ export class CampaignsEngine {
           );
           prepared.set(r.id, {
             contactId: p.contactId,
-            rendered: renderCampaignText(r.messageText, r.companyName, campaign.appendOptOutFooter),
+            rendered: rendered.get(r.id)!,
           });
         }),
       );

@@ -7,7 +7,7 @@ describe('parseCampaignCsv', () => {
   it('vírgula, aliases e números de linha', () => {
     const rows = parseCampaignCsv(buf('telefone,empresa,mensagem\n11999998888,Acme,Oi {{empresa}}\n'));
     expect(rows).toEqual([
-      { rowNumber: 2, rawPhone: '11999998888', companyName: 'Acme', messageText: 'Oi {{empresa}}' },
+      { rowNumber: 2, rawPhone: '11999998888', companyName: 'Acme', messageText: 'Oi {{empresa}}', customData: {} },
     ]);
   });
 
@@ -47,5 +47,26 @@ describe('parseCampaignCsv', () => {
   it('limite de linhas', () => {
     const lines = Array.from({ length: 5001 }, (_, i) => `${i},A,m`).join('\n');
     expect(() => parseCampaignCsv(buf(`whatsapp,empresa,mensagem\n${lines}`))).toThrow(/5000/);
+  });
+
+  it('colunas extras viram customData com chave normalizada (variáveis da mensagem)', () => {
+    const rows = parseCampaignCsv(
+      buf('whatsapp;empresa;mensagem;Cidade;Instagram URL;Observação\n11999998888;Acme;Oi {{cidade}};Goiânia;https://instagram.com/acme;\n'),
+    );
+    expect(rows[0].customData).toEqual({ cidade: 'Goiânia', instagram_url: 'https://instagram.com/acme' });
+    // valor vazio não vira chave (a importação invalida a linha se o modelo usar a variável)
+    expect(rows[0].customData).not.toHaveProperty('observacao');
+  });
+
+  it('coluna extra repetida não sobrescreve; valores longos são cortados', () => {
+    const long = 'x'.repeat(900);
+    const rows = parseCampaignCsv(buf(`whatsapp,empresa,mensagem,cidade,cidade\n11999998888,Acme,Oi,${long},Outra\n`));
+    expect(rows[0].customData.cidade).toHaveLength(500);
+  });
+
+  it('mais de 20 colunas extras é recusado', () => {
+    const extra = Array.from({ length: 21 }, (_, i) => `c${i}`);
+    const csv = `whatsapp,empresa,mensagem,${extra.join(',')}\n11999998888,A,B,${extra.map(() => 'v').join(',')}\n`;
+    expect(() => parseCampaignCsv(buf(csv))).toThrow(/colunas extras/);
   });
 });

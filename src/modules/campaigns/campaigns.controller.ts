@@ -23,6 +23,7 @@ import {
   ImportCampaignDto,
   ListCampaignsQueryDto,
   ListRecipientsQueryDto,
+  PreviewCampaignQueryDto,
   UpdateCampaignDto,
 } from './dto/campaign.dto';
 
@@ -83,6 +84,17 @@ export class CampaignsController {
     @Query() query: ListRecipientsQueryDto,
   ) {
     return this.service.recipients(orgId, id, access, query);
+  }
+
+  @Get(':id/preview')
+  @ApiOperation({ summary: 'Pré-visualiza a mensagem renderizada (variáveis + spintax) com um destinatário real' })
+  preview(
+    @Param('id') id: string,
+    @CurrentOrg('id') orgId: string,
+    @CurrentChannelAccess() access: ChannelAccess,
+    @Query() query: PreviewCampaignQueryDto,
+  ) {
+    return this.service.preview(orgId, id, access, query);
   }
 
   @Patch(':id')

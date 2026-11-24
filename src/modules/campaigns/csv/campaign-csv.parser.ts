@@ -9,6 +9,8 @@ export interface ParsedCsvRow {
   rawPhone: string;
   companyName: string;
   messageText: string;
+  /** Colunas extras do CSV (chaves normalizadas): variáveis `{{chave}}` da mensagem. */
+  customData: Record<string, string>;
   /** Preenchido quando a linha já é inválida no parse (mensagem vazia/longa). */
   error?: string;
 }
@@ -85,6 +87,19 @@ export function parseCampaignCsv(buf: Buffer): ParsedCsvRow[] {
     throw new BadRequestException(`Colunas obrigatórias ausentes: ${missing.join(', ')}`);
   }
 
+  // Colunas extras (qualquer cabeçalho que não seja telefone/empresa/mensagem) viram variáveis.
+  const core = new Set([phoneIdx, companyIdx, messageIdx]);
+  const extraCols: Array<{ index: number; key: string }> = [];
+  const usedKeys = new Set<string>(['empresa']);
+  header.forEach((key, index) => {
+    if (core.has(index) || !key || usedKeys.has(key)) return;
+    usedKeys.add(key);
+    extraCols.push({ index, key });
+  });
+  if (extraCols.length > CAMPAIGN_LIMITS.maxExtraColumns) {
+    throw new BadRequestException(`O arquivo tem mais de ${CAMPAIGN_LIMITS.maxExtraColumns} colunas extras`);
+  }
+
   const dataRows = records.slice(1);
   if (dataRows.length > CAMPAIGN_LIMITS.maxRows) {
     throw new BadRequestException(`O arquivo excede ${CAMPAIGN_LIMITS.maxRows} linhas`);
@@ -97,7 +112,12 @@ export function parseCampaignCsv(buf: Buffer): ParsedCsvRow[] {
       rawPhone: (r[phoneIdx] ?? '').trim(),
       companyName: (r[companyIdx] ?? '').replace(CONTROL_CHARS, '').trim(),
       messageText,
+      customData: {},
     };
+    for (const { index, key } of extraCols) {
+      const v = (r[index] ?? '').replace(CONTROL_CHARS, '').trim().slice(0, CAMPAIGN_LIMITS.maxExtraValueChars);
+      if (v) row.customData[key] = v;
+    }
     if (!messageText) row.error = 'MESSAGE_EMPTY';
     else if (messageText.length > CAMPAIGN_LIMITS.maxMessageChars) row.error = 'MESSAGE_TOO_LONG';
     return row;

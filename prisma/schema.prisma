@@ -1950,6 +1950,8 @@ model CampaignRecipient {
   phoneE164         String?                 @map("phone_e164")
   jid               String?
   companyName       String                  @map("company_name")
+  /// Colunas extras do CSV (chaves normalizadas), usadas como variáveis {{chave}} na mensagem.
+  customData        Json                    @default("{}") @map("custom_data")
   messageText       String                  @map("message_text") @db.Text
   /// Texto final enviado (placeholder + rodapé). Usado no matching do echo.
   renderedText      String?                 @map("rendered_text") @db.Text

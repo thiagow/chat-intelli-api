@@ -108,6 +108,29 @@ describe('CampaignsEngine.submitBatch', () => {
     expect(new Set(typing).size).toBeGreaterThan(1);
   });
 
+  it('renderiza variáveis do CSV e spintax de forma determinística; variável ausente vira FAILED e não é enviada', async () => {
+    const recipients = [
+      { id: 'r1', phoneE164: '5511999998888', jid: '5511999998888@s.whatsapp.net', companyName: 'Acme', messageText: '{Olá|Oi} {{empresa}} de {{cidade}}', customData: { cidade: 'Goiânia' }, rowNumber: 2 },
+      { id: 'r2', phoneE164: '5511988887777', jid: '5511988887777@s.whatsapp.net', companyName: 'Beta', messageText: '{Olá|Oi} {{empresa}} de {{cidade}}', customData: {}, rowNumber: 3 },
+    ];
+    const run = async () => {
+      const ctx = build({ recipients });
+      await ctx.engine.submitBatch('cmp1', 'b1');
+      return ctx;
+    };
+    const a = await run();
+    const msgs = a.createFolder.mock.calls[0][1].messages;
+    expect(msgs).toHaveLength(1); // r2 ficou de fora
+    expect(msgs[0].text).toMatch(/^(Olá|Oi) Acme de Goiânia/);
+    expect(a.prisma.campaignRecipient.update).toHaveBeenCalledWith({
+      where: { id: 'r2' },
+      data: expect.objectContaining({ status: 'FAILED', error: expect.stringContaining('VARIABLE_MISSING:cidade') }),
+    });
+    // mesma semente (campanha+destinatário): o retry gera o MESMO texto
+    const b = await run();
+    expect(b.createFolder.mock.calls[0][1].messages[0].text).toBe(msgs[0].text);
+  });
+
   it('digitação desligada (typingMaxMs = 0): nenhuma mensagem leva typingMs', async () => {
     const { engine, createFolder } = build({ typing: [0, 0] });
     await engine.submitBatch('cmp1', 'b1');

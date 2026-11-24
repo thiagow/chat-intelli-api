@@ -200,3 +200,19 @@ export class ListRecipientsQueryDto extends ListCampaignsQueryDto {
   @IsBoolean()
   replied?: boolean;
 }
+
+export class PreviewCampaignQueryDto {
+  @ApiPropertyOptional({ description: 'Quantas variações renderizar (1–5)', default: 3 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(5)
+  n?: number;
+
+  @ApiPropertyOptional({ description: 'Anexar o rodapé de opt-out (padrão: o da campanha)' })
+  @IsOptional()
+  @Transform(({ value }) => (value === undefined ? undefined : value === 'true' || value === true))
+  @IsBoolean()
+  footer?: boolean;
+}
