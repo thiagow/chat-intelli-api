@@ -1877,6 +1877,11 @@ model Campaign {
 
   // Proteção do número: teto diário, janela e dias de envio.
   dailyCap           Int     @default(200) @map("daily_cap")
+  /// Máximo de mensagens por lote (cada lote = uma pasta na UaZAPI). O teto diário é fatiado em lotes.
+  batchSize          Int     @default(20) @map("batch_size")
+  /// Pausa aleatória ENTRE lotes (segundos), sorteada por nós a partir do término real do lote anterior.
+  batchPauseMinSec   Int     @default(300) @map("batch_pause_min_sec")
+  batchPauseMaxSec   Int     @default(900) @map("batch_pause_max_sec")
   sendWindowStart    String  @default("09:00") @map("send_window_start")
   sendWindowEnd      String  @default("18:00") @map("send_window_end")
   sendWeekdays       Int[]   @default([1, 2, 3, 4, 5]) @map("send_weekdays")

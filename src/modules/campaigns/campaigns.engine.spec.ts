@@ -9,6 +9,9 @@ function build(opts: { folders?: any[]; createFolder?: jest.Mock; recipients?: a
     delayMinSec: 30,
     delayMaxSec: 90,
     dailyCap: 200,
+    batchSize: 20,
+    batchPauseMinSec: 300,
+    batchPauseMaxSec: 300,
     sendWindowStart: '00:00',
     sendWindowEnd: '23:59',
     sendWeekdays: [0, 1, 2, 3, 4, 5, 6],
@@ -134,11 +137,41 @@ describe('CampaignsEngine.submitBatch', () => {
     prisma.campaignBatch.findUnique.mockResolvedValue({
       id: 'b2', campaignId: 'cmp1', batchIndex: 1, status: 'PLANNED', providerFolderId: null, scheduledFor: new Date(),
     });
-    prisma.campaignBatch.findFirst.mockResolvedValue({ id: 'b1' });
+    prisma.campaignBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'RUNNING', completedAt: null });
     const out = await engine.submitBatch('cmp1', 'b2');
     expect(out.skipped).toBe('previous_batch_active');
-    expect(queue.add).toHaveBeenCalled();
+    expect(queue.add).toHaveBeenCalledWith(
+      'submit-batch',
+      { campaignId: 'cmp1', batchId: 'b2' },
+      expect.objectContaining({ delay: 60_000 }),
+    );
     expect(createFolder).not.toHaveBeenCalled();
+  });
+
+  it('lote seguinte só começa depois da pausa contada a partir do término REAL do anterior', async () => {
+    const { engine, createFolder, prisma } = build();
+    prisma.campaignBatch.findUnique.mockResolvedValue({
+      id: 'b2', campaignId: 'cmp1', batchIndex: 1, status: 'PLANNED', providerFolderId: null, scheduledFor: new Date(),
+    });
+    // O anterior terminou agora: a pausa de 300s (min = max) ainda vale.
+    prisma.campaignBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DONE', completedAt: new Date() });
+    const before = Date.now();
+    await engine.submitBatch('cmp1', 'b2');
+    expect(createFolder).toHaveBeenCalledTimes(1);
+    const { scheduledFor } = createFolder.mock.calls[0][1];
+    expect(scheduledFor).toBeGreaterThanOrEqual(before + 299_000);
+  });
+
+  it('lote anterior terminou há muito tempo: a pausa não atrasa o próximo', async () => {
+    const { engine, createFolder, prisma } = build();
+    prisma.campaignBatch.findUnique.mockResolvedValue({
+      id: 'b2', campaignId: 'cmp1', batchIndex: 1, status: 'PLANNED', providerFolderId: null, scheduledFor: new Date(),
+    });
+    prisma.campaignBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DONE', completedAt: new Date(Date.now() - 3_600_000) });
+    const before = Date.now();
+    await engine.submitBatch('cmp1', 'b2');
+    const { scheduledFor } = createFolder.mock.calls[0][1];
+    expect(scheduledFor).toBeLessThan(before + 60_000);
   });
 
   it('pausa/cancelamento DURANTE a submissão: a pasta recém-criada é parada, não fica viva', async () => {

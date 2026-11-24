@@ -1,4 +1,4 @@
-import { effectiveDailyCap, planBatches } from './campaign-batch-planner';
+import { effectiveDailyCap, fitCount, planBatches, randomPauseSec } from './campaign-batch-planner';
 
 const TZ = 'America/Sao_Paulo'; // UTC-3 (sem DST desde 2019)
 const base = {
@@ -52,6 +52,73 @@ describe('planBatches', () => {
     expect(plan.effectiveDailyCap).toBe(540);
     expect(plan.capLimitedByWindow).toBe(true);
     expect(plan.batches.map((b) => b.size)).toEqual([540, 460]);
+  });
+
+  describe('lotes dentro do dia com pausa aleatória', () => {
+    const pace = { ...base, batchSize: 40, batchPauseMinSec: 300, batchPauseMaxSec: 300 };
+
+    it('fatia o dia em lotes de até batchSize, com a pausa entre eles', () => {
+      const plan = planBatches({ ...pace, recipientCount: 100, dailyCap: 100, notBefore: new Date('2026-11-23T09:00:00Z') });
+      expect(plan.batches.map((b) => b.size)).toEqual([40, 40, 20]);
+      // 40 × 60s = 2400s de envio + 300s de pausa = 45 min entre inícios
+      expect(plan.batches[0].scheduledFor.toISOString()).toBe('2026-11-23T12:00:00.000Z');
+      expect(plan.batches[1].scheduledFor.toISOString()).toBe('2026-11-23T12:45:00.000Z');
+      expect(plan.batches[2].scheduledFor.toISOString()).toBe('2026-11-23T13:30:00.000Z');
+      expect(plan.days).toBe(1);
+    });
+
+    it('batchSize maior que o teto diário não cria lote vazio', () => {
+      const plan = planBatches({ ...pace, batchSize: 500, recipientCount: 30, dailyCap: 30, notBefore: new Date('2026-11-23T09:00:00Z') });
+      expect(plan.batches.map((b) => b.size)).toEqual([30]);
+    });
+
+    it('o teto diário continua valendo e o resto vai para o próximo dia útil', () => {
+      const plan = planBatches({
+        ...base,
+        batchSize: 20,
+        batchPauseMinSec: 60,
+        batchPauseMaxSec: 60,
+        recipientCount: 70,
+        dailyCap: 30,
+        notBefore: new Date('2026-11-23T09:00:00Z'),
+      });
+      expect(plan.batches.map((b) => b.size)).toEqual([20, 10, 20, 10, 10]);
+      expect(plan.days).toBe(3);
+      expect(plan.batches[2].scheduledFor.toISOString()).toBe('2026-11-24T12:00:00.000Z');
+    });
+
+    it('as pausas contam na capacidade da janela (usa a pausa máxima)', () => {
+      // 1h = 3600s; média 60s; lotes de 20; pausa máx 600s → cabem 40 (2400s + 600s), não 60
+      expect(effectiveDailyCap(1000, '09:00', '10:00', 30, 90, 20, 600)).toEqual({ cap: 40, limitedByWindow: true });
+      expect(fitCount(3600, 60, 20, 600)).toBe(40);
+      expect(fitCount(3600, 60, 20, 0)).toBe(60);
+    });
+
+    it('a pausa sorteada fica dentro da faixa (aleatoriedade injetada)', () => {
+      expect(randomPauseSec(300, 900, () => 0)).toBe(300);
+      expect(randomPauseSec(300, 900, () => 0.5)).toBe(600);
+      expect(randomPauseSec(300, 900, () => 1)).toBe(900);
+      expect(randomPauseSec(900, 300, () => 0.5)).toBe(900); // max < min: usa o mínimo
+    });
+
+    it('com pausas diferentes entre lotes o início de cada lote respeita o sorteio', () => {
+      const seq = [0, 1];
+      let i = 0;
+      const plan = planBatches({
+        ...base,
+        batchSize: 10,
+        batchPauseMinSec: 300,
+        batchPauseMaxSec: 900,
+        recipientCount: 30,
+        dailyCap: 30,
+        notBefore: new Date('2026-11-23T09:00:00Z'),
+        random: () => seq[i++ % 2],
+      });
+      const starts = plan.batches.map((b) => b.scheduledFor.getTime());
+      // 10 × 60s = 600s de envio; pausa 300s (sorteio 0) e depois 900s (sorteio 1)
+      expect(starts[1] - starts[0]).toBe((600 + 300) * 1000);
+      expect(starts[2] - starts[1]).toBe((600 + 900) * 1000);
+    });
   });
 
   it('valida entradas', () => {

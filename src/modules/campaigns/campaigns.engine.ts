@@ -8,7 +8,7 @@ import { BulkSenderPort } from '../channel-hub/ports/bulk-sender.port';
 import { ContactProvisioningService } from '../channel-hub/utils/contact-provisioning.service';
 import { phoneMatchKey, stripWhatsappJid } from '../channel-hub/utils/whatsapp-jid';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
-import { planBatches, getZonedParts, zonedToUtc, parseHm } from './batching/campaign-batch-planner';
+import { planBatches, getZonedParts, zonedToUtc, parseHm, randomPauseSec } from './batching/campaign-batch-planner';
 import { renderCampaignText } from './campaign-text';
 import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS, CAMPAIGN_LIMITS } from './campaigns.constants';
 
@@ -260,6 +260,11 @@ export class CampaignsEngine {
 
   // ─── submit-batch ──────────────────────────────────────────────────
 
+  /** Ritmo entre lotes da campanha (tamanho máximo + pausa aleatória), para o planejador. */
+  private pacing(c: { batchSize: number; batchPauseMinSec: number; batchPauseMaxSec: number }) {
+    return { batchSize: c.batchSize, batchPauseMinSec: c.batchPauseMinSec, batchPauseMaxSec: c.batchPauseMaxSec };
+  }
+
   private nextWindowStart(c: CampaignWithChannel, notBefore: Date): Date {
     const plan = planBatches({
       recipientCount: 1,
@@ -282,24 +287,36 @@ export class CampaignsEngine {
     if (!['SUBMITTING', 'SCHEDULED', 'RUNNING'].includes(campaign.status)) return { skipped: 'campaign_not_active' };
     if (!['PLANNED', 'SUBMITTING'].includes(batch.status)) return { skipped: 'batch_not_pending' };
 
-    // Lote anterior ainda ativo → o window-guard o fecha no fim da janela; tenta de novo depois.
+    // Lote anterior ainda ativo → um lote só entra depois que o anterior termina (o window-guard
+    // fecha o anterior no fim da janela). Reverifica em 1 min: assim a pausa começa logo após o término real.
+    let notBefore = Math.max(Date.now(), batch.scheduledFor.getTime());
     if (batch.batchIndex > 0) {
       const prev = await this.prisma.campaignBatch.findFirst({
-        where: { campaignId, batchIndex: { lt: batch.batchIndex }, status: { in: ['SUBMITTING', 'SCHEDULED', 'RUNNING'] } },
-        select: { id: true },
+        where: { campaignId, batchIndex: { lt: batch.batchIndex } },
+        orderBy: { batchIndex: 'desc' },
+        select: { id: true, status: true, completedAt: true },
       });
-      if (prev) {
+      if (prev && ['PLANNED', 'SUBMITTING', 'SCHEDULED', 'RUNNING'].includes(prev.status)) {
         await this.queue.add(
           CAMPAIGN_JOBS.SUBMIT_BATCH,
           { campaignId, batchId },
-          { delay: 30 * 60_000, jobId: `batch-${batchId}-r${Date.now()}`, attempts: 3, ...JOB_OPTS },
+          { delay: 60_000, jobId: `batch-${batchId}-r${Date.now()}`, attempts: 3, ...JOB_OPTS },
         );
         return { skipped: 'previous_batch_active' };
+      }
+      // Pausa aleatória (sorteada por nós) contada a partir do término REAL do lote anterior,
+      // sem depender só do intervalo entre mensagens da UaZAPI.
+      if (prev?.completedAt) {
+        const pause = randomPauseSec(campaign.batchPauseMinSec, campaign.batchPauseMaxSec);
+        notBefore = Math.max(notBefore, prev.completedAt.getTime() + pause * 1000);
       }
     }
 
     // Início real respeita janela/dias, mesmo se a submissão atrasou (resume, retry…).
-    const startAt = this.nextWindowStart(campaign, new Date(Math.max(Date.now(), batch.scheduledFor.getTime())));
+    // O planejador trabalha em minutos inteiros e arredonda "agora" para baixo: se o instante já está
+    // dentro da janela, usa-o exato para a pausa de proteção nunca encolher.
+    const planned = this.nextWindowStart(campaign, new Date(notBefore));
+    const startAt = planned.getTime() < notBefore ? new Date(notBefore) : planned;
 
     // Recheck de opt-out (de qualquer campanha da org) desde o import.
     const recipients = await this.prisma.campaignRecipient.findMany({
@@ -501,6 +518,7 @@ export class CampaignsEngine {
       delayMinSec: campaign.delayMinSec,
       delayMaxSec: campaign.delayMaxSec,
       notBefore: new Date(),
+      ...this.pacing(campaign),
     });
     let offset = 0;
     for (const p of plan.batches) {

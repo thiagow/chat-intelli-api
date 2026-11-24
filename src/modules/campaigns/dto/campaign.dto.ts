@@ -89,6 +89,27 @@ export class UpdateCampaignDto {
   @Max(CAMPAIGN_LIMITS.maxDailyCap)
   dailyCap?: number;
 
+  @ApiPropertyOptional({ description: 'Máximo de mensagens por lote (cada lote é uma pasta na UaZAPI)' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(CAMPAIGN_LIMITS.maxBatchSize)
+  batchSize?: number;
+
+  @ApiPropertyOptional({ description: 'Pausa mínima entre lotes, em segundos' })
+  @IsOptional()
+  @IsInt()
+  @Min(CAMPAIGN_LIMITS.minBatchPauseSec)
+  @Max(CAMPAIGN_LIMITS.maxBatchPauseSec)
+  batchPauseMinSec?: number;
+
+  @ApiPropertyOptional({ description: 'Pausa máxima entre lotes, em segundos' })
+  @IsOptional()
+  @IsInt()
+  @Min(CAMPAIGN_LIMITS.minBatchPauseSec)
+  @Max(CAMPAIGN_LIMITS.maxBatchPauseSec)
+  batchPauseMaxSec?: number;
+
   @ApiPropertyOptional({ example: '09:00' })
   @IsOptional()
   @Matches(HM)

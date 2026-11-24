@@ -75,6 +75,9 @@ export class CampaignsService {
         maxRows: CAMPAIGN_LIMITS.maxRows,
         maxFileBytes: CAMPAIGN_LIMITS.maxFileBytes,
         maxDailyCap: CAMPAIGN_LIMITS.maxDailyCap,
+        maxBatchSize: CAMPAIGN_LIMITS.maxBatchSize,
+        minBatchPauseSec: CAMPAIGN_LIMITS.minBatchPauseSec,
+        maxBatchPauseSec: CAMPAIGN_LIMITS.maxBatchPauseSec,
         minDelaySec: CAMPAIGN_LIMITS.minDelaySec,
         maxDelaySec: CAMPAIGN_LIMITS.maxDelaySec,
       },
@@ -171,10 +174,14 @@ export class CampaignsService {
         delayMinSec: campaign.delayMinSec,
         delayMaxSec: campaign.delayMaxSec,
         notBefore: campaign.scheduledAt && campaign.scheduledAt > new Date() ? campaign.scheduledAt : new Date(),
+        batchSize: campaign.batchSize,
+        batchPauseMinSec: campaign.batchPauseMinSec,
+        batchPauseMaxSec: campaign.batchPauseMaxSec,
       });
       return {
         recipients: sendable,
-        days: plan.batches.length,
+        days: plan.days,
+        batches: plan.batches.length,
         effectiveDailyCap: plan.effectiveDailyCap,
         capLimitedByWindow: plan.capLimitedByWindow,
         firstBatchAt: plan.batches[0]?.scheduledFor ?? null,
@@ -331,7 +338,12 @@ export class CampaignsService {
       delayMaxSec: dto.delayMaxSec ?? campaign.delayMaxSec,
       sendWindowStart: dto.sendWindowStart ?? campaign.sendWindowStart,
       sendWindowEnd: dto.sendWindowEnd ?? campaign.sendWindowEnd,
+      batchPauseMinSec: dto.batchPauseMinSec ?? campaign.batchPauseMinSec,
+      batchPauseMaxSec: dto.batchPauseMaxSec ?? campaign.batchPauseMaxSec,
     };
+    if (next.batchPauseMaxSec < next.batchPauseMinSec) {
+      throw new UnprocessableEntityException('A pausa máxima entre lotes precisa ser maior ou igual à mínima');
+    }
     if (next.delayMaxSec < next.delayMinSec) {
       throw new UnprocessableEntityException('O intervalo máximo precisa ser maior ou igual ao mínimo');
     }
@@ -353,6 +365,9 @@ export class CampaignsService {
         ...(dto.replyRouting !== undefined && { replyRouting: dto.replyRouting }),
         ...(dto.replyWindowDays !== undefined && { replyWindowDays: dto.replyWindowDays }),
         ...(dto.dailyCap !== undefined && { dailyCap: dto.dailyCap }),
+        ...(dto.batchSize !== undefined && { batchSize: dto.batchSize }),
+        ...(dto.batchPauseMinSec !== undefined && { batchPauseMinSec: dto.batchPauseMinSec }),
+        ...(dto.batchPauseMaxSec !== undefined && { batchPauseMaxSec: dto.batchPauseMaxSec }),
         ...(dto.sendWindowStart !== undefined && { sendWindowStart: dto.sendWindowStart }),
         ...(dto.sendWindowEnd !== undefined && { sendWindowEnd: dto.sendWindowEnd }),
         ...(dto.sendWeekdays !== undefined && { sendWeekdays: [...new Set(dto.sendWeekdays)].sort() }),
@@ -398,6 +413,9 @@ export class CampaignsService {
       delayMinSec: campaign.delayMinSec,
       delayMaxSec: campaign.delayMaxSec,
       notBefore: campaign.scheduledAt && campaign.scheduledAt > new Date() ? campaign.scheduledAt : new Date(),
+      batchSize: campaign.batchSize,
+      batchPauseMinSec: campaign.batchPauseMinSec,
+      batchPauseMaxSec: campaign.batchPauseMaxSec,
     });
 
     // Webhook precisa assinar `sender` (canais antigos foram configurados sem ele).

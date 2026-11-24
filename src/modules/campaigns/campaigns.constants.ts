@@ -18,6 +18,10 @@ export const CAMPAIGN_LIMITS = {
   maxRows: 5000,
   maxMessageChars: 4096,
   maxDailyCap: 1000,
+  /** Lote = uma pasta na UaZAPI; lotes menores espalham melhor o envio. */
+  maxBatchSize: 500,
+  minBatchPauseSec: 60,
+  maxBatchPauseSec: 10_800,
   minDelaySec: 10,
   maxDelaySec: 600,
   checkBatchSize: 50,
