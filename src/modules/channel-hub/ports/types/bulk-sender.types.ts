@@ -47,7 +47,7 @@ export type BulkControlAction =
   | 'send_now'
   | 'reschedule';
 
-export type BulkMessageStatus = 'PENDING' | 'SENT' | 'FAILED' | 'UNKNOWN';
+export type BulkMessageStatus = 'PENDING' | 'SENT' | 'DELIVERED' | 'READ' | 'FAILED' | 'UNKNOWN';
 
 export interface BulkFolderMessage {
   /** JID do destinatário (`chatid`). */

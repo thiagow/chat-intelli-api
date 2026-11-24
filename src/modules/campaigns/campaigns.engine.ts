@@ -6,7 +6,7 @@ import { PrismaService } from '../../database/prisma.service';
 import { ChannelAdapterRegistry } from '../channel-hub/channel-adapter.registry';
 import { BulkSenderPort } from '../channel-hub/ports/bulk-sender.port';
 import { ContactProvisioningService } from '../channel-hub/utils/contact-provisioning.service';
-import { stripWhatsappJid } from '../channel-hub/utils/whatsapp-jid';
+import { phoneMatchKey, stripWhatsappJid } from '../channel-hub/utils/whatsapp-jid';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { planBatches, getZonedParts, zonedToUtc, parseHm } from './batching/campaign-batch-planner';
 import { renderCampaignText } from './campaign-text';
@@ -607,25 +607,33 @@ export class CampaignsEngine {
     const recipients = await this.prisma.campaignRecipient.findMany({
       where: { batchId: batch.id, status: { in: ['QUEUED', 'SENT', 'DELIVERED', 'READ'] } },
     });
+    // phoneMatchKey: o chatid devolvido pelo WhatsApp pode vir sem o 9º dígito do celular BR.
     const byNumber = new Map<string, CampaignRecipient>();
-    for (const r of recipients) byNumber.set(digits(stripWhatsappJid(r.jid ?? r.phoneE164 ?? '')), r);
+    for (const r of recipients) byNumber.set(phoneMatchKey(r.jid ?? r.phoneE164 ?? ''), r);
 
     let offset = 0;
     let anySent = false;
     for (;;) {
       const page = await bulk.listFolderMessages(campaign.channel, batch.providerFolderId!, { limit: 1000, offset });
       for (const m of page.messages) {
-        const r = byNumber.get(digits(stripWhatsappJid(m.chatId)));
+        const r = byNumber.get(phoneMatchKey(m.chatId));
         if (!r) continue;
-        if (m.status === 'SENT') anySent = true;
+        if (['SENT', 'DELIVERED', 'READ'].includes(m.status)) anySent = true;
         const data: Prisma.CampaignRecipientUpdateInput = {};
         if (m.providerMessageId && !r.providerMessageId) data.providerMessageId = m.providerMessageId;
         if (m.status === 'FAILED' && r.status === 'QUEUED') {
           data.status = 'FAILED';
           data.error = (m.error ?? 'Falha no envio').slice(0, 500);
-        } else if (m.status === 'SENT' && r.status === 'QUEUED') {
-          data.status = 'SENT';
-          data.sentAt = r.sentAt ?? new Date();
+        } else if (['SENT', 'DELIVERED', 'READ'].includes(m.status)) {
+          // Preenche eventos perdidos (webhook) sem nunca regredir: QUEUED < SENT < DELIVERED < READ.
+          const rank: Record<string, number> = { QUEUED: 0, SENT: 1, DELIVERED: 2, READ: 3 };
+          if ((rank[m.status] ?? 0) > (rank[r.status] ?? 0)) {
+            const now = new Date();
+            data.status = m.status as 'SENT' | 'DELIVERED' | 'READ';
+            data.sentAt = r.sentAt ?? now;
+            if (m.status !== 'SENT') data.deliveredAt = r.deliveredAt ?? now;
+            if (m.status === 'READ') data.readAt = r.readAt ?? now;
+          }
         }
         if (Object.keys(data).length) {
           await this.prisma.campaignRecipient.update({ where: { id: r.id }, data });

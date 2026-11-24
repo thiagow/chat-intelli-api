@@ -29,3 +29,14 @@ export function toWhatsappExternalId(
 export function stripWhatsappJid(externalId: string): string {
   return externalId.replace(/@s\.whatsapp\.net$|@g\.us$/, '');
 }
+
+/**
+ * Chave de comparação de números/JIDs do WhatsApp. Celulares brasileiros existem nas duas
+ * formas (com e sem o nono dígito) e o WhatsApp devolve a forma "real" da conta, que pode
+ * diferir da digitada: 5562991785173 ↔ 556291785173. Remove o 9 de 55 + DDD + 9 + 8 dígitos
+ * para que as duas formas casem. Só para COMPARAR; nunca para enviar nem gravar.
+ */
+export function phoneMatchKey(value: string): string {
+  const d = stripWhatsappJid(value).replace(/\D/g, '');
+  return d.length === 13 && d.startsWith('55') && d[4] === '9' ? d.slice(0, 4) + d.slice(5) : d;
+}

@@ -25,7 +25,9 @@ function pickArray(data: any, ...keys: string[]): any[] {
 /** Normaliza o status de mensagem de pasta da UaZAPI. */
 export function mapFolderMessageStatus(raw: unknown): BulkMessageStatus {
   const s = String(raw ?? '').toLowerCase();
-  if (['sent', 'success', 'delivered', 'read'].includes(s)) return 'SENT';
+  if (['read', 'played'].includes(s)) return 'READ';
+  if (s === 'delivered') return 'DELIVERED';
+  if (['sent', 'success'].includes(s)) return 'SENT';
   if (['failed', 'error'].includes(s)) return 'FAILED';
   if (['scheduled', 'pending', 'queued', 'sending'].includes(s)) return 'PENDING';
   return 'UNKNOWN';

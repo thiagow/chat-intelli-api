@@ -120,6 +120,8 @@ describe('helpers do sender', () => {
 
   it('mapFolderMessageStatus', () => {
     expect(mapFolderMessageStatus('Sent')).toBe('SENT');
+    expect(mapFolderMessageStatus('Delivered')).toBe('DELIVERED');
+    expect(mapFolderMessageStatus('Read')).toBe('READ');
     expect(mapFolderMessageStatus('error')).toBe('FAILED');
     expect(mapFolderMessageStatus('scheduled')).toBe('PENDING');
     expect(mapFolderMessageStatus('???')).toBe('UNKNOWN');

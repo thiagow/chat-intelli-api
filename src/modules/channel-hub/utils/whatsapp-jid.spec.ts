@@ -1,5 +1,6 @@
 import { ChannelType } from '@prisma/client';
 import {
+  phoneMatchKey,
   stripWhatsappJid,
   toWhatsappExternalId,
   usesJidExternalId,
@@ -32,6 +33,20 @@ describe('whatsapp-jid', () => {
     expect(usesJidExternalId(ChannelType.WHATSAPP_UAZAPI)).toBe(true);
     expect(usesJidExternalId(ChannelType.WHATSAPP_OFFICIAL)).toBe(false);
     expect(usesJidExternalId(undefined)).toBe(false);
+  });
+
+  it('phoneMatchKey casa celular BR com e sem o nono dígito', () => {
+    const com9 = phoneMatchKey('5562991785173@s.whatsapp.net');
+    const sem9 = phoneMatchKey('556291785173@s.whatsapp.net');
+    expect(com9).toBe(sem9);
+    expect(com9).toBe('556291785173');
+  });
+
+  it('phoneMatchKey não altera fixo, estrangeiro nem número já sem 9', () => {
+    expect(phoneMatchKey('556233221100')).toBe('556233221100');
+    expect(phoneMatchKey('14155550123')).toBe('14155550123');
+    expect(phoneMatchKey('5511999990000')).toBe('551199990000');
+    expect(phoneMatchKey('5511899990000')).toBe('5511899990000');
   });
 
   it('stripWhatsappJid remove o sufixo', () => {
