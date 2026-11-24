@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Channel, ChannelType } from '@prisma/client';
 import { BulkSenderPort } from '../../ports/bulk-sender.port';
 import {
@@ -64,6 +64,7 @@ function toFolder(f: any): BulkFolder {
 @Injectable()
 export class UazapiBulkSenderAdapter implements BulkSenderPort {
   readonly channelType = ChannelType.WHATSAPP_UAZAPI;
+  private readonly logger = new Logger(UazapiBulkSenderAdapter.name);
 
   constructor(private readonly http: UazapiHttpClient) {}
 
@@ -77,13 +78,35 @@ export class UazapiBulkSenderAdapter implements BulkSenderPort {
   }
 
   async createFolder(channel: Channel, input: CreateBulkFolderInput): Promise<BulkFolder> {
-    const data = await this.http.senderAdvanced(channel, {
-      messages: input.messages.map((m) => ({ number: m.number, type: 'text', text: m.text })),
+    const build = (withTyping: boolean) => ({
+      messages: input.messages.map((m) => ({
+        number: m.number,
+        type: 'text' as const,
+        text: m.text,
+        // `delay` (ms): a UaZAPI mostra "Digitando…" durante o atraso antes de enviar.
+        ...(withTyping && m.typingMs ? { delay: Math.round(m.typingMs) } : {}),
+      })),
       delayMin: input.delayMinSec,
       delayMax: input.delayMaxSec,
       info: input.info,
       ...(input.scheduledFor && { scheduled_for: input.scheduledFor }),
     });
+
+    const hasTyping = input.messages.some((m) => m.typingMs);
+    let data: any;
+    try {
+      data = await this.http.senderAdvanced(channel, build(hasTyping));
+    } catch (error: any) {
+      // A doc só garante `delay` nos /send/*. Se o /sender/advanced recusar o campo, envia sem
+      // digitação em vez de derrubar a campanha (idempotência por `info` evita pasta duplicada).
+      const status = error?.response?.status;
+      if (hasTyping && (status === 400 || status === 422)) {
+        this.logger.warn('UaZAPI /sender/advanced recusou o campo "delay": reenviando sem digitação simulada');
+        data = await this.http.senderAdvanced(channel, build(false));
+      } else {
+        throw error;
+      }
+    }
     const folderId = data?.folder_id ?? data?.folderId ?? data?.id;
     if (!folderId) {
       throw new Error(`UaZAPI /sender/advanced sem folder_id: ${JSON.stringify(data)}`);

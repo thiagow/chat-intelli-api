@@ -265,7 +265,7 @@ export class UazapiHttpClient {
   async senderAdvanced(
     channel: Channel,
     payload: {
-      messages: Array<{ number: string; type: 'text'; text: string }>;
+      messages: Array<{ number: string; type: 'text'; text: string; delay?: number }>;
       delayMin: number;
       delayMax: number;
       info: string;

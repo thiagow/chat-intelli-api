@@ -175,6 +175,8 @@ export class CampaignsService {
         delayMaxSec: campaign.delayMaxSec,
         notBefore: campaign.scheduledAt && campaign.scheduledAt > new Date() ? campaign.scheduledAt : new Date(),
         batchSize: campaign.batchSize,
+        batchSizeMin: campaign.batchSizeMin,
+        startJitterMaxMin: campaign.startJitterMaxMin,
         batchPauseMinSec: campaign.batchPauseMinSec,
         batchPauseMaxSec: campaign.batchPauseMaxSec,
       });
@@ -341,8 +343,20 @@ export class CampaignsService {
       batchPauseMinSec: dto.batchPauseMinSec ?? campaign.batchPauseMinSec,
       batchPauseMaxSec: dto.batchPauseMaxSec ?? campaign.batchPauseMaxSec,
     };
-    if (next.batchPauseMaxSec < next.batchPauseMinSec) {
-      throw new UnprocessableEntityException('A pausa máxima entre lotes precisa ser maior ou igual à mínima');
+    // Faixa de verdade: pausa fixa entre lotes é um padrão fácil de detectar como robô.
+    if (next.batchPauseMaxSec <= next.batchPauseMinSec) {
+      throw new UnprocessableEntityException('A pausa máxima entre lotes precisa ser maior que a mínima (pausa fixa é detectável)');
+    }
+    const sizeMax = dto.batchSize ?? campaign.batchSize;
+    // Reduzir só o máximo leva o mínimo junto (em vez de erro).
+    const sizeMin = dto.batchSizeMin ?? Math.min(campaign.batchSizeMin, sizeMax);
+    if (sizeMin > sizeMax) {
+      throw new UnprocessableEntityException('O tamanho mínimo do lote não pode ser maior que o máximo');
+    }
+    const typingMin = dto.typingMinMs ?? campaign.typingMinMs;
+    const typingMax = dto.typingMaxMs ?? campaign.typingMaxMs;
+    if (typingMax > 0 && typingMax < typingMin) {
+      throw new UnprocessableEntityException('A digitação máxima precisa ser maior ou igual à mínima');
     }
     if (next.delayMaxSec < next.delayMinSec) {
       throw new UnprocessableEntityException('O intervalo máximo precisa ser maior ou igual ao mínimo');
@@ -366,6 +380,10 @@ export class CampaignsService {
         ...(dto.replyWindowDays !== undefined && { replyWindowDays: dto.replyWindowDays }),
         ...(dto.dailyCap !== undefined && { dailyCap: dto.dailyCap }),
         ...(dto.batchSize !== undefined && { batchSize: dto.batchSize }),
+        ...((dto.batchSizeMin !== undefined || dto.batchSize !== undefined) && { batchSizeMin: sizeMin }),
+        ...(dto.startJitterMaxMin !== undefined && { startJitterMaxMin: dto.startJitterMaxMin }),
+        ...(dto.typingMinMs !== undefined && { typingMinMs: dto.typingMinMs }),
+        ...(dto.typingMaxMs !== undefined && { typingMaxMs: dto.typingMaxMs }),
         ...(dto.batchPauseMinSec !== undefined && { batchPauseMinSec: dto.batchPauseMinSec }),
         ...(dto.batchPauseMaxSec !== undefined && { batchPauseMaxSec: dto.batchPauseMaxSec }),
         ...(dto.sendWindowStart !== undefined && { sendWindowStart: dto.sendWindowStart }),
@@ -414,6 +432,8 @@ export class CampaignsService {
       delayMaxSec: campaign.delayMaxSec,
       notBefore: campaign.scheduledAt && campaign.scheduledAt > new Date() ? campaign.scheduledAt : new Date(),
       batchSize: campaign.batchSize,
+      batchSizeMin: campaign.batchSizeMin,
+      startJitterMaxMin: campaign.startJitterMaxMin,
       batchPauseMinSec: campaign.batchPauseMinSec,
       batchPauseMaxSec: campaign.batchPauseMaxSec,
     });

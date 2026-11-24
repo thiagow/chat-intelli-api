@@ -1,4 +1,4 @@
-import { effectiveDailyCap, fitCount, planBatches, randomPauseSec } from './campaign-batch-planner';
+import { effectiveDailyCap, fitCount, planBatches, randomInt, randomPauseSec } from './campaign-batch-planner';
 
 const TZ = 'America/Sao_Paulo'; // UTC-3 (sem DST desde 2019)
 const base = {
@@ -99,6 +99,80 @@ describe('planBatches', () => {
       expect(randomPauseSec(300, 900, () => 0.5)).toBe(600);
       expect(randomPauseSec(300, 900, () => 1)).toBe(900);
       expect(randomPauseSec(900, 300, () => 0.5)).toBe(900); // max < min: usa o mínimo
+    });
+
+    it('o tamanho de cada lote é sorteado entre batchSizeMin e batchSize (o último leva o resto)', () => {
+      const seq = [0, 0.999];
+      let i = 0;
+      const plan = planBatches({
+        ...base,
+        batchSize: 20,
+        batchSizeMin: 10,
+        batchPauseMinSec: 60,
+        batchPauseMaxSec: 60, // sem faixa: não gasta sorteio, a sequência é só do tamanho
+        recipientCount: 50,
+        dailyCap: 50,
+        notBefore: new Date('2026-11-23T09:00:00Z'),
+        random: () => seq[i++ % 2],
+      });
+      expect(plan.batches.map((b) => b.size)).toEqual([10, 20, 10, 10]);
+      expect(plan.batches.reduce((n, b) => n + b.size, 0)).toBe(50);
+    });
+
+    it('com sorteio real todos os lotes ficam dentro da faixa e a soma fecha', () => {
+      const plan = planBatches({
+        ...base,
+        batchSize: 20,
+        batchSizeMin: 8,
+        batchPauseMinSec: 60,
+        batchPauseMaxSec: 120,
+        recipientCount: 300,
+        dailyCap: 300,
+        notBefore: new Date('2026-11-23T09:00:00Z'),
+      });
+      const sizes = plan.batches.map((b) => b.size);
+      expect(sizes.reduce((a, b) => a + b, 0)).toBe(300);
+      // todos dentro de [8, 20] exceto, no máximo, o último de cada dia (resto)
+      const outOfRange = plan.batches.filter((b, idx, arr) => {
+        const sameDayNext = arr[idx + 1] && arr[idx + 1].scheduledFor.getTime() - b.scheduledFor.getTime() < 86_400_000 / 2;
+        return (b.size < 8 || b.size > 20) && sameDayNext;
+      });
+      expect(outOfRange).toEqual([]);
+      expect(new Set(sizes).size).toBeGreaterThan(1); // não são todos iguais
+    });
+
+    it('jitter: o dia não abre sempre na hora cheia da janela', () => {
+      const plan = planBatches({
+        ...base,
+        startJitterMaxMin: 15,
+        recipientCount: 1,
+        dailyCap: 10,
+        notBefore: new Date('2026-11-23T09:00:00Z'),
+        random: () => 0.5,
+      });
+      // 09:00 BRT + 7min30s (0,5 × 15 min)
+      expect(plan.batches[0].scheduledFor.toISOString()).toBe('2026-11-23T12:07:30.000Z');
+    });
+
+    it('jitter 0 mantém o início exato; e não se aplica a "hoje, a partir de agora"', () => {
+      const exact = planBatches({ ...base, startJitterMaxMin: 0, recipientCount: 1, dailyCap: 10, notBefore: new Date('2026-11-23T09:00:00Z') });
+      expect(exact.batches[0].scheduledFor.toISOString()).toBe('2026-11-23T12:00:00.000Z');
+      const today = planBatches({ ...base, startJitterMaxMin: 15, recipientCount: 1, dailyCap: 10, notBefore: new Date('2026-11-23T19:00:00Z'), random: () => 0.9 });
+      expect(today.batches[0].scheduledFor.toISOString()).toBe('2026-11-23T19:00:00.000Z');
+    });
+
+    it('o jitter reserva tempo da janela (pior caso) na capacidade', () => {
+      // 1h; média 60s; sem jitter cabem 60; com jitter de até 10 min sobram 50 min = 50
+      expect(effectiveDailyCap(1000, '09:00', '10:00', 30, 90, 1000, 0, 0).cap).toBe(60);
+      expect(effectiveDailyCap(1000, '09:00', '10:00', 30, 90, 1000, 0, 600).cap).toBe(50);
+    });
+
+    it('randomInt é inclusivo e não gasta sorteio sem faixa', () => {
+      expect(randomInt(5, 9, () => 0)).toBe(5);
+      expect(randomInt(5, 9, () => 0.999)).toBe(9);
+      const spy = jest.fn(() => 0.5);
+      expect(randomInt(7, 7, spy)).toBe(7);
+      expect(spy).not.toHaveBeenCalled();
     });
 
     it('com pausas diferentes entre lotes o início de cada lote respeita o sorteio', () => {

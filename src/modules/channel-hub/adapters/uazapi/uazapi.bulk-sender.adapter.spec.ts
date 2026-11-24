@@ -53,6 +53,52 @@ describe('UazapiBulkSenderAdapter', () => {
     ).rejects.toThrow(/folder_id/);
   });
 
+  it('createFolder envia a digitação simulada como delay (ms) por mensagem', async () => {
+    http.senderAdvanced.mockResolvedValue({ folder_id: 'F1' });
+    await adapter.createFolder(channel, {
+      messages: [
+        { number: '5511999998888', text: 'a', typingMs: 3500 },
+        { number: '5511988887777', text: 'b', typingMs: 5200 },
+        { number: '5511977776666', text: 'c' },
+      ],
+      delayMinSec: 30,
+      delayMaxSec: 90,
+      info: 'ic:c:0',
+    });
+    const sent = http.senderAdvanced.mock.calls[0][1].messages;
+    expect(sent[0].delay).toBe(3500);
+    expect(sent[1].delay).toBe(5200);
+    expect(sent[2]).not.toHaveProperty('delay');
+  });
+
+  it('createFolder: se a UaZAPI recusar o campo delay, reenvia sem digitação em vez de falhar', async () => {
+    http.senderAdvanced
+      .mockRejectedValueOnce({ response: { status: 400, data: { message: 'unknown field delay' } } })
+      .mockResolvedValueOnce({ folder_id: 'F2' });
+    const f = await adapter.createFolder(channel, {
+      messages: [{ number: '5511999998888', text: 'a', typingMs: 4000 }],
+      delayMinSec: 30,
+      delayMaxSec: 90,
+      info: 'ic:c:1',
+    });
+    expect(f.folderId).toBe('F2');
+    expect(http.senderAdvanced).toHaveBeenCalledTimes(2);
+    expect(http.senderAdvanced.mock.calls[1][1].messages[0]).not.toHaveProperty('delay');
+  });
+
+  it('createFolder: erro que não é de validação não é mascarado pelo fallback', async () => {
+    http.senderAdvanced.mockRejectedValue({ response: { status: 500 } });
+    await expect(
+      adapter.createFolder(channel, {
+        messages: [{ number: '5511999998888', text: 'a', typingMs: 4000 }],
+        delayMinSec: 30,
+        delayMaxSec: 90,
+        info: 'ic:c:2',
+      }),
+    ).rejects.toEqual({ response: { status: 500 } });
+    expect(http.senderAdvanced).toHaveBeenCalledTimes(1);
+  });
+
   it('listFolders e listFolderMessages mapeiam contadores/status e paginação', async () => {
     http.senderListFolders.mockResolvedValue([{ id: 'F1', info: 'ic:c:0', status: 'done', log_sucess: 3, log_failed: 1 }]);
     expect(await adapter.listFolders(channel)).toEqual([

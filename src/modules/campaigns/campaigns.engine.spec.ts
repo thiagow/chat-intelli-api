@@ -1,6 +1,6 @@
 import { CampaignsEngine } from './campaigns.engine';
 
-function build(opts: { folders?: any[]; createFolder?: jest.Mock; recipients?: any[]; optedOutPhones?: string[] } = {}) {
+function build(opts: { folders?: any[]; createFolder?: jest.Mock; recipients?: any[]; optedOutPhones?: string[]; typing?: [number, number] } = {}) {
   const campaign = {
     id: 'cmp1',
     organizationId: 'org1',
@@ -12,6 +12,10 @@ function build(opts: { folders?: any[]; createFolder?: jest.Mock; recipients?: a
     batchSize: 20,
     batchPauseMinSec: 300,
     batchPauseMaxSec: 300,
+    batchSizeMin: 20,
+    startJitterMaxMin: 0,
+    typingMinMs: opts.typing?.[0] ?? 0,
+    typingMaxMs: opts.typing?.[1] ?? 0,
     sendWindowStart: '00:00',
     sendWindowEnd: '23:59',
     sendWeekdays: [0, 1, 2, 3, 4, 5, 6],
@@ -90,6 +94,24 @@ describe('CampaignsEngine.submitBatch', () => {
     // renderedText foi persistido antes de chamar o provider
     const persistedBeforeCreate = prisma.campaignRecipient.update.mock.invocationCallOrder[0] < createFolder.mock.invocationCallOrder[0];
     expect(persistedBeforeCreate).toBe(true);
+  });
+
+  it('digitação simulada: cada mensagem recebe um typingMs sorteado na faixa (e varia entre mensagens)', async () => {
+    const recipients = Array.from({ length: 12 }, (_, i) => ({
+      id: `r${i}`, phoneE164: `55119999${String(i).padStart(5, '0')}`, jid: `55119999${String(i).padStart(5, '0')}@s.whatsapp.net`,
+      companyName: `Emp${i}`, messageText: 'Oi {{empresa}}', rowNumber: i + 2,
+    }));
+    const { engine, createFolder } = build({ recipients, typing: [3000, 6000] });
+    await engine.submitBatch('cmp1', 'b1');
+    const typing = createFolder.mock.calls[0][1].messages.map((m: any) => m.typingMs);
+    expect(typing.every((t: number) => t >= 3000 && t <= 6000)).toBe(true);
+    expect(new Set(typing).size).toBeGreaterThan(1);
+  });
+
+  it('digitação desligada (typingMaxMs = 0): nenhuma mensagem leva typingMs', async () => {
+    const { engine, createFolder } = build({ typing: [0, 0] });
+    await engine.submitBatch('cmp1', 'b1');
+    expect(createFolder.mock.calls[0][1].messages.every((m: any) => !('typingMs' in m))).toBe(true);
   });
 
   it('retry depois de timeout NÃO duplica: reaproveita a pasta já existente pelo info', async () => {

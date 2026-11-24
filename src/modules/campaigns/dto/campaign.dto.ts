@@ -96,6 +96,34 @@ export class UpdateCampaignDto {
   @Max(CAMPAIGN_LIMITS.maxBatchSize)
   batchSize?: number;
 
+  @ApiPropertyOptional({ description: 'Tamanho mínimo do lote (o tamanho de cada lote é sorteado entre este valor e batchSize)' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(CAMPAIGN_LIMITS.maxBatchSize)
+  batchSizeMin?: number;
+
+  @ApiPropertyOptional({ description: 'Variação máxima, em minutos, no início do dia de envio' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(CAMPAIGN_LIMITS.maxStartJitterMin)
+  startJitterMaxMin?: number;
+
+  @ApiPropertyOptional({ description: 'Digitação simulada mínima por mensagem (ms)' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(CAMPAIGN_LIMITS.maxTypingMs)
+  typingMinMs?: number;
+
+  @ApiPropertyOptional({ description: 'Digitação simulada máxima por mensagem (ms). 0 = desligada' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(CAMPAIGN_LIMITS.maxTypingMs)
+  typingMaxMs?: number;
+
   @ApiPropertyOptional({ description: 'Pausa mínima entre lotes, em segundos' })
   @IsOptional()
   @IsInt()

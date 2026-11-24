@@ -16,6 +16,8 @@ export interface BulkMessageInput {
   /** Telefone E.164 só com dígitos, ou JID. */
   number: string;
   text: string;
+  /** Digitação simulada (ms) antes do envio desta mensagem ("Digitando…"). Sorteada por mensagem. */
+  typingMs?: number;
 }
 
 export interface CreateBulkFolderInput {

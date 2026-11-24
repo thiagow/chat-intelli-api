@@ -21,6 +21,10 @@ export interface BatchPlanInput {
   /** Pausa aleatória entre lotes do mesmo dia (segundos). Ausente = 0. */
   batchPauseMinSec?: number;
   batchPauseMaxSec?: number;
+  /** Tamanho mínimo do lote: cada lote é sorteado entre `batchSizeMin` e `batchSize`. Ausente = `batchSize` fixo. */
+  batchSizeMin?: number;
+  /** Variação (min) no início do dia: o 1º lote começa em janela + sorteio(0, jitter). Ausente = 0. */
+  startJitterMaxMin?: number;
   /** Fonte de aleatoriedade (injetável nos testes). */
   random?: () => number;
 }
@@ -125,8 +129,10 @@ export function effectiveDailyCap(
   delayMaxSec: number,
   batchSize: number = Number.MAX_SAFE_INTEGER,
   pauseMaxSec = 0,
+  startJitterMaxSec = 0,
 ): { cap: number; limitedByWindow: boolean } {
-  const windowSec = (parseHm(windowEnd) - parseHm(windowStart)) * 60;
+  // O jitter de início consome parte da janela: reserva o pior caso.
+  const windowSec = Math.max(0, (parseHm(windowEnd) - parseHm(windowStart)) * 60 - startJitterMaxSec);
   const avg = (delayMinSec + delayMaxSec) / 2;
   const fits = Math.max(1, fitCount(windowSec, avg, batchSize, pauseMaxSec));
   return fits < dailyCap ? { cap: fits, limitedByWindow: true } : { cap: dailyCap, limitedByWindow: false };
@@ -136,7 +142,16 @@ export function effectiveDailyCap(
 export function randomPauseSec(min: number, max: number, random: () => number = Math.random): number {
   const lo = Math.max(0, min);
   const hi = Math.max(lo, max);
+  if (hi === lo) return Math.round(lo); // sem faixa: não gasta sorteio
   return Math.round(lo + random() * (hi - lo));
+}
+
+/** Inteiro sorteado em [min, max] (inclusivo). */
+export function randomInt(min: number, max: number, random: () => number = Math.random): number {
+  const lo = Math.ceil(Math.min(min, max));
+  const hi = Math.floor(Math.max(min, max));
+  if (hi === lo) return lo; // sem faixa: não gasta sorteio
+  return lo + Math.floor(random() * (hi - lo + 1));
 }
 
 export function planBatches(input: BatchPlanInput): BatchPlan {
@@ -146,6 +161,9 @@ export function planBatches(input: BatchPlanInput): BatchPlan {
   if (!input.weekdays.length) throw new Error('Selecione ao menos um dia da semana');
 
   const batchSize = Math.max(1, input.batchSize ?? Number.MAX_SAFE_INTEGER);
+  // Piso do sorteio do tamanho do lote (nunca acima do máximo).
+  const batchSizeMin = Math.min(batchSize, Math.max(1, input.batchSizeMin ?? batchSize));
+  const jitterMaxSec = Math.max(0, (input.startJitterMaxMin ?? 0) * 60);
   const pauseMin = Math.max(0, input.batchPauseMinSec ?? 0);
   const pauseMax = Math.max(pauseMin, input.batchPauseMaxSec ?? pauseMin);
   const random = input.random ?? Math.random;
@@ -156,8 +174,9 @@ export function planBatches(input: BatchPlanInput): BatchPlan {
     input.windowEnd,
     input.delayMinSec,
     input.delayMaxSec,
-    batchSize,
+    batchSizeMin,
     pauseMax,
+    jitterMaxSec,
   );
   const avgSec = (input.delayMinSec + input.delayMaxSec) / 2;
 
@@ -186,16 +205,19 @@ export function planBatches(input: BatchPlanInput): BatchPlan {
       if (first.minutes >= end) continue;
       startMin = Math.max(start, first.minutes);
     }
-    const slotSec = (end - startMin) * 60;
-    const fitsToday = fitCount(slotSec, avgSec, batchSize, pauseMax);
+    // Jitter só no dia que abre na hora cheia da janela (não "hoje, a partir de agora").
+    const jitterSec = startMin === start ? randomPauseSec(0, jitterMaxSec, random) : 0;
+    const slotSec = Math.max(0, (end - startMin) * 60 - (startMin === start ? jitterMaxSec : 0));
+    const fitsToday = fitCount(slotSec, avgSec, batchSizeMin, pauseMax);
     let dayTotal = Math.min(cap, fitsToday, remaining);
     if (dayTotal <= 0) continue;
     days++;
 
     // Fatia o dia em lotes de até `batchSize`, com pausa aleatória entre eles.
-    let cursor = zonedToUtc(y, m, d, startMin, input.timezone).getTime();
+    let cursor = zonedToUtc(y, m, d, startMin, input.timezone).getTime() + jitterSec * 1000;
     while (dayTotal > 0) {
-      const size = Math.min(batchSize, dayTotal);
+      // Tamanho sorteado por lote (o último leva o que sobrar): lotes sempre iguais são um padrão detectável.
+      const size = Math.min(randomInt(batchSizeMin, batchSize, random), dayTotal);
       batches.push({ batchIndex: batches.length, scheduledFor: new Date(cursor), size });
       const runMs = size * avgSec * 1000;
       lastEnd = new Date(cursor + runMs);

@@ -22,6 +22,8 @@ export const CAMPAIGN_LIMITS = {
   maxBatchSize: 500,
   minBatchPauseSec: 60,
   maxBatchPauseSec: 10_800,
+  maxStartJitterMin: 120,
+  maxTypingMs: 30_000,
   minDelaySec: 10,
   maxDelaySec: 600,
   checkBatchSize: 50,

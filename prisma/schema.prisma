@@ -1882,6 +1882,13 @@ model Campaign {
   /// Pausa aleatória ENTRE lotes (segundos), sorteada por nós a partir do término real do lote anterior.
   batchPauseMinSec   Int     @default(300) @map("batch_pause_min_sec")
   batchPauseMaxSec   Int     @default(900) @map("batch_pause_max_sec")
+  /// Tamanho mínimo do lote: cada lote é sorteado entre batchSizeMin e batchSize (nunca sempre igual).
+  batchSizeMin       Int     @default(12) @map("batch_size_min")
+  /// Variação (minutos) no início do dia: o 1º lote não começa sempre na abertura exata da janela.
+  startJitterMaxMin  Int     @default(15) @map("start_jitter_max_min")
+  /// Digitação simulada por mensagem (ms, sorteada em cada envio). 0 em typingMaxMs = desligada.
+  typingMinMs        Int     @default(3000) @map("typing_min_ms")
+  typingMaxMs        Int     @default(6000) @map("typing_max_ms")
   sendWindowStart    String  @default("09:00") @map("send_window_start")
   sendWindowEnd      String  @default("18:00") @map("send_window_end")
   sendWeekdays       Int[]   @default([1, 2, 3, 4, 5]) @map("send_weekdays")

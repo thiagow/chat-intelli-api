@@ -8,7 +8,7 @@ import { BulkSenderPort } from '../channel-hub/ports/bulk-sender.port';
 import { ContactProvisioningService } from '../channel-hub/utils/contact-provisioning.service';
 import { phoneMatchKey, stripWhatsappJid } from '../channel-hub/utils/whatsapp-jid';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
-import { planBatches, getZonedParts, zonedToUtc, parseHm, randomPauseSec } from './batching/campaign-batch-planner';
+import { planBatches, getZonedParts, zonedToUtc, parseHm, randomInt, randomPauseSec } from './batching/campaign-batch-planner';
 import { renderCampaignText } from './campaign-text';
 import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS, CAMPAIGN_LIMITS } from './campaigns.constants';
 
@@ -261,8 +261,20 @@ export class CampaignsEngine {
   // ─── submit-batch ──────────────────────────────────────────────────
 
   /** Ritmo entre lotes da campanha (tamanho máximo + pausa aleatória), para o planejador. */
-  private pacing(c: { batchSize: number; batchPauseMinSec: number; batchPauseMaxSec: number }) {
-    return { batchSize: c.batchSize, batchPauseMinSec: c.batchPauseMinSec, batchPauseMaxSec: c.batchPauseMaxSec };
+  private pacing(c: {
+    batchSize: number;
+    batchSizeMin: number;
+    batchPauseMinSec: number;
+    batchPauseMaxSec: number;
+    startJitterMaxMin: number;
+  }) {
+    return {
+      batchSize: c.batchSize,
+      batchSizeMin: c.batchSizeMin,
+      batchPauseMinSec: c.batchPauseMinSec,
+      batchPauseMaxSec: c.batchPauseMaxSec,
+      startJitterMaxMin: c.startJitterMaxMin,
+    };
   }
 
   private nextWindowStart(c: CampaignWithChannel, notBefore: Date): Date {
@@ -397,6 +409,10 @@ export class CampaignsEngine {
         messages: sendable.map((r) => ({
           number: stripWhatsappJid(r.jid ?? r.phoneE164!),
           text: prepared.get(r.id)!.rendered,
+          // Digitação simulada sorteada POR MENSAGEM (typingMaxMs = 0 desliga).
+          ...(campaign.typingMaxMs > 0 && {
+            typingMs: randomInt(campaign.typingMinMs, campaign.typingMaxMs),
+          }),
         })),
         delayMinSec: campaign.delayMinSec,
         delayMaxSec: campaign.delayMaxSec,
