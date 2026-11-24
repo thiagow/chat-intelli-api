@@ -17,6 +17,110 @@ export function isOptOutText(text: string | null | undefined): boolean {
   return (OPT_OUT_KEYWORDS as readonly string[]).includes(n);
 }
 
+// ─── Resposta negativa (opt-out por conteúdo) ────────────────────────
+
+/** Minúsculo, sem acento nem pontuação, espaços colapsados — base da detecção de resposta negativa. */
+export function normalizeReply(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    // pontuação separa orações: "não, pode tirar da lista" ≠ "não vou sair da lista"
+    .replace(/[,.;:!?()\-–—]+/g, ' | ')
+    .replace(/[^a-z0-9|]+/g, ' ')
+    .replace(/ +/g, ' ')
+    .trim();
+}
+
+/** Frases explícitas de recusa: valem em qualquer posição da mensagem (com limite de palavra). */
+const NEGATIVE_PHRASES = [
+  // desinteresse
+  'nao tenho interesse', 'nao temos interesse', 'nao tenho mais interesse', 'sem interesse',
+  'nao me interessa', 'nao estou interessado', 'nao estou interessada',
+  // sair da lista
+  'tirar da lista', 'tira da lista', 'tire da lista', 'me tire da lista', 'me tira da lista', 'tirem da lista',
+  'remover da lista', 'remova da lista', 'retirar da lista', 'retire da lista', 'excluir da lista', 'exclua da lista',
+  'sair da lista', 'saia da lista', 'me remova', 'me remove', 'me exclua', 'me tire',
+  // não quer receber
+  'nao quero receber', 'nao quero mais receber', 'nao me envie', 'nao me mande', 'nao envie mais', 'nao mande mais',
+  'nao quero mais mensagem', 'nao quero mais mensagens', 'nao quero mais contato',
+  // descadastro
+  'cancelar inscricao', 'cancelar cadastro', 'unsubscribe',
+  // sinais de denúncia (o número está em risco)
+  'vou denunciar', 'vou te denunciar', 'vou bloquear', 'vou te bloquear', 'e spam', 'isso e spam',
+] as const;
+
+/** Verbos de "pare/saia/tire". `para` só vale seguido de "de" (senão é preposição). */
+const STOP_VERBS = new Set([
+  'parar', 'pare', 'parem', 'para', 'sair', 'saia', 'cancelar', 'cancele', 'remover', 'remova', 'remove',
+  'tirar', 'tire', 'tira', 'retirar', 'retire', 'excluir', 'exclua', 'apagar', 'apague',
+]);
+/** Alvos que tornam o verbo uma recusa de contato (e não "parar na loja", "cancelar o contrato"). */
+const STOP_TARGETS = new Set([
+  'lista', 'contato', 'contatos', 'mensagem', 'mensagens', 'msg', 'receber', 'enviar', 'mandar', 'enviando',
+  'mandando', 'spam', 'cadastro', 'numero', 'whatsapp', 'ligar', 'ligacao', 'ligacoes', 'email', 'emails', 'propaganda', 'promocao', 'promocoes',
+]);
+const NEGATIONS = new Set(['nao', 'nunca', 'jamais', 'sem']);
+
+export type NegativeReplyKind = 'EXACT' | 'PHRASE' | 'VERB_TARGET' | 'DESCADASTR';
+
+export interface NegativeReply {
+  kind: NegativeReplyKind;
+  /** Trecho que disparou (para auditoria). */
+  term: string;
+}
+
+/**
+ * Detecta recusa/pedido de saída numa resposta. Conservador de propósito: bloquear um lead legítimo por
+ * falso positivo também custa dinheiro, então palavras soltas ("parar", "sair", "cancelar") só valem
+ *   - se a mensagem for SÓ isso (SAIR, PARAR, STOP…), ou
+ *   - seguidas de um alvo de contato ("parar de me mandar mensagem", "sair da lista"), sem negação antes
+ *     ("não vou sair da lista"), ou
+ *   - dentro de uma frase explícita de recusa ("não tenho interesse", "tirar da lista").
+ * "Posso parar na loja amanhã?" e "cancelar o contrato" NÃO disparam.
+ */
+export function detectNegativeReply(text: string | null | undefined): NegativeReply | null {
+  if (!text) return null;
+  if (isOptOutText(text)) return { kind: 'EXACT', term: normalizeForMatch(text).replace(/[.!?]+$/g, '') };
+
+  const n = normalizeReply(text);
+  if (!n) return null;
+  const tokens = n.split(' ');
+
+  /** Há negação nas 2 palavras antes de `i`, sem atravessar uma quebra de oração ("|")? */
+  const negatedBefore = (i: number): boolean => {
+    for (let k = i - 1, seen = 0; k >= 0 && seen < 2; k--, seen++) {
+      if (tokens[k] === '|') return false;
+      if (NEGATIONS.has(tokens[k])) return true;
+    }
+    return false;
+  };
+
+  for (const phrase of NEGATIVE_PHRASES) {
+    const words = phrase.split(' ');
+    for (let i = 0; i + words.length <= tokens.length; i++) {
+      if (!words.every((w, k) => tokens[i + k] === w)) continue;
+      // Frases que já nascem negativas ("não tenho interesse", "sem interesse") não sofrem a regra de negação;
+      // as demais ("sair da lista", "me remova") são anuladas por "não vou sair da lista".
+      const intrinsic = words[0] === 'nao' || words[0] === 'sem';
+      if (!intrinsic && negatedBefore(i)) continue;
+      return { kind: 'PHRASE', term: phrase };
+    }
+  }
+  const desc = n.match(/\bdescadastr\w*/);
+  if (desc) return { kind: 'DESCADASTR', term: desc[0] };
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!STOP_VERBS.has(t)) continue;
+    if (t === 'para' && tokens[i + 1] !== 'de') continue;
+    if (negatedBefore(i)) continue; // "não vou sair da lista", "nunca vou parar de receber"
+    const target = tokens.slice(i + 1, i + 5).find((x) => STOP_TARGETS.has(x));
+    if (target) return { kind: 'VERB_TARGET', term: t + ' … ' + target };
+  }
+  return null;
+}
+
 /** Normaliza o nome de uma variável/coluna: sem acento, minúsculo, `_` no lugar de símbolos. */
 export function normalizeVarName(raw: string): string {
   return raw

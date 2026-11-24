@@ -1,4 +1,5 @@
 import {
+  detectNegativeReply,
   extractVariables,
   isOptOutText,
   normalizeVarName,
@@ -103,6 +104,91 @@ describe('campaign-text', () => {
         expect(v).toBeGreaterThanOrEqual(0);
         expect(v).toBeLessThan(1);
       }
+    });
+  });
+
+  describe('detectNegativeReply (opt-out por conteúdo da resposta)', () => {
+    it.each([
+      // exemplos do requisito
+      'Parar',
+      'parar!',
+      'Não tenho interesse',
+      'nao tenho interesse, obrigado',
+      'Por favor, tirar da lista',
+      'me tire da lista',
+      // variações comuns
+      'Sem interesse.',
+      'não me interessa',
+      'Não temos interesse no momento',
+      'pode remover da lista?',
+      'me remova dessa lista',
+      'Não quero receber mais mensagens',
+      'não me envie mais nada',
+      'parar de me mandar mensagem',
+      'pare de enviar isso',
+      'para de me ligar',
+      'quero sair da lista',
+      'Descadastrar',
+      'quero me descadastrar',
+      'unsubscribe',
+      'isso é spam',
+      'vou denunciar esse número',
+      // existentes (match exato)
+      'SAIR', 'stop', 'Cancelar', 'DESCADASTRAR',
+    ])('detecta recusa: %s', (txt) => {
+      expect(detectNegativeReply(txt)).not.toBeNull();
+    });
+
+    it.each([
+      'Olá, tenho interesse! Pode me ligar?',
+      'Posso parar na loja amanhã?',
+      'Vou parar de comprar do fornecedor atual e fechar com vocês',
+      'Quero cancelar o contrato com meu fornecedor atual',
+      'não vou sair da lista de vocês, quero continuar recebendo',
+      'nunca vou parar de receber as ofertas, adoro',
+      'Pode enviar a proposta?',
+      'Para receber a proposta, qual o e-mail?',
+      'Qual o prazo para entrega?',
+      'sim, pode mandar mais detalhes',
+      'preciso sair para uma reunião, falo com você depois',
+      '',
+      '   ',
+    ])('NÃO bloqueia lead legítimo: "%s"', (txt) => {
+      expect(detectNegativeReply(txt)).toBeNull();
+    });
+
+    it('negação anula o pedido, mas pontuação separa as orações', () => {
+      expect(detectNegativeReply('não vou sair da lista')).toBeNull();
+      expect(detectNegativeReply('nunca me remova da lista, adoro as ofertas')).toBeNull();
+      expect(detectNegativeReply('não me tire da lista')).toBeNull();
+      // vírgula/ponto encerram a oração: aqui o "não" é a resposta e o pedido vem depois
+      expect(detectNegativeReply('Não, pode tirar da lista')).toMatchObject({ kind: 'PHRASE' });
+      expect(detectNegativeReply('Não. Me remova da lista')).toMatchObject({ kind: 'PHRASE' });
+      // frases que já nascem negativas não são anuladas pelo "não" que fazem parte
+      expect(detectNegativeReply('não tenho interesse')).toMatchObject({ kind: 'PHRASE' });
+      expect(detectNegativeReply('sem interesse, obrigado')).toMatchObject({ kind: 'PHRASE' });
+    });
+
+    it('texto nulo/indefinido não detecta', () => {
+      expect(detectNegativeReply(null)).toBeNull();
+      expect(detectNegativeReply(undefined)).toBeNull();
+    });
+
+    it('ignora acento, caixa e pontuação', () => {
+      expect(detectNegativeReply('NÃO TENHO INTERESSE!!!')).toMatchObject({ kind: 'PHRASE' });
+      expect(detectNegativeReply('TIRAR   DA   LISTA!!!')).toMatchObject({ kind: 'PHRASE' });
+    });
+
+    it('informa o tipo e o trecho que disparou (auditoria)', () => {
+      expect(detectNegativeReply('SAIR')).toMatchObject({ kind: 'EXACT' });
+      expect(detectNegativeReply('não tenho interesse')).toEqual({ kind: 'PHRASE', term: 'nao tenho interesse' });
+      expect(detectNegativeReply('pare de me mandar mensagem')).toMatchObject({ kind: 'VERB_TARGET' });
+      expect(detectNegativeReply('quero me descadastrar')).toMatchObject({ kind: 'DESCADASTR' });
+    });
+
+    it('"para" só vale com "de" (senão é preposição)', () => {
+      expect(detectNegativeReply('para de me enviar')).toMatchObject({ kind: 'VERB_TARGET' });
+      expect(detectNegativeReply('para enviar o orçamento preciso do CNPJ')).toBeNull();
     });
   });
 });

@@ -12,7 +12,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../../database/prisma.service';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
-import { isOptOutText, sameRenderedText } from '../campaign-text';
+import { detectNegativeReply, NegativeReply, sameRenderedText } from '../campaign-text';
 import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS } from '../campaigns.constants';
 
 const RANK: Partial<Record<CampaignRecipientStatus, number>> = {
@@ -43,6 +43,15 @@ export interface CampaignEchoInput {
   externalMessageId: string;
   text: string | null;
   timestamp?: Date | string;
+}
+
+/** Desfecho do rastreio de uma mensagem recebida. */
+export interface CampaignInboundOutcome {
+  /**
+   * O contato recusou/pediu para sair: o pipeline NÃO pode acionar IA, chatbot nem automações e deve
+   * encerrar a conversa sem responder.
+   */
+  optedOut: boolean;
 }
 
 export interface CampaignInboundInput {
@@ -124,17 +133,22 @@ export class CampaignTrackingService {
    * histórico da conversa, aplica o roteamento escolhido, marca REPLIED e
    * trata opt-out. Chamado depois do resolve da conversa.
    */
-  async onInbound(input: CampaignInboundInput): Promise<void> {
+  async onInbound(input: CampaignInboundInput): Promise<CampaignInboundOutcome> {
     try {
-      await this.handleReply(input);
-      await this.handleOptOut(input);
+      // Resposta negativa ("parar", "não tenho interesse", "tirar da lista"…): o contato vai para a
+      // blacklist e o fluxo ENCERRA sem responder (sem IA, chatbot, automação nem webhook externo).
+      const negative = detectNegativeReply(input.text);
+      await this.handleReply(input, negative);
+      const optedOut = await this.handleOptOut(input, negative);
+      return { optedOut };
     } catch (err: any) {
       // Rastreio nunca pode derrubar o pipeline de inbound.
       this.logger.error(`Campaign inbound hook falhou: ${err.message}`, err.stack);
+      return { optedOut: false };
     }
   }
 
-  private async handleReply(input: CampaignInboundInput): Promise<void> {
+  private async handleReply(input: CampaignInboundInput, negative: NegativeReply | null): Promise<void> {
     const recipients = await this.prisma.campaignRecipient.findMany({
       where: {
         organizationId: input.organizationId,
@@ -166,7 +180,9 @@ export class CampaignTrackingService {
 
     const messageId = await this.materializeCampaignMessage(recipient, input.conversationId);
 
-    if (input.conversationIsFresh) {
+    // Resposta negativa não é um lead: nada de roteamento para IA, contexto de venda nem webhook para
+    // agentes externos (ex.: gerador de demo). A conversa é só registrada e encerrada.
+    if (input.conversationIsFresh && !negative) {
       await this.applyRouting(input.conversationId, recipient.campaign.replyRouting);
       await this.attachAiContext(input.conversationId, recipient);
     }
@@ -178,10 +194,10 @@ export class CampaignTrackingService {
         repliedAt,
         conversationId: input.conversationId,
         ...(messageId && { messageId }),
-        ...(recipient.campaign.onReplyWebhookUrl && { replyWebhookStatus: 'PENDING' }),
+        ...(recipient.campaign.onReplyWebhookUrl && !negative && { replyWebhookStatus: 'PENDING' }),
       },
     });
-    await this.enqueueReplyWebhook(recipient, input.text, repliedAt);
+    if (!negative) await this.enqueueReplyWebhook(recipient, input.text, repliedAt);
     this.realtime.emitToOrg(input.organizationId, 'campaign:reply', {
       campaignId: recipient.campaignId,
       recipientId: recipient.id,
@@ -294,8 +310,13 @@ export class CampaignTrackingService {
     });
   }
 
-  private async handleOptOut(input: CampaignInboundInput): Promise<void> {
-    if (!isOptOutText(input.text)) return;
+  /**
+   * Blacklist (opt-out) do contato por conteúdo da resposta. Só vale para quem RECEBEU campanha (um cliente
+   * qualquer dizendo "parar" sobre outro assunto não é blacklistado). A conversa fica com a IA desligada:
+   * mesmo que reabra depois, só um atendente humano decide. Devolve true quando o fluxo deve encerrar.
+   */
+  private async handleOptOut(input: CampaignInboundInput, negative: NegativeReply | null): Promise<boolean> {
+    if (!negative) return false;
 
     const received = await this.prisma.campaignRecipient.findFirst({
       where: {
@@ -306,18 +327,33 @@ export class CampaignTrackingService {
       orderBy: { sentAt: 'desc' },
       select: { campaignId: true },
     });
-    if (!received) return;
+    if (!received) return false;
 
+    // `marketingOptOutAt` é a blacklist da organização: a importação exclui o contato e os lotes ainda não
+    // enviados de QUALQUER campanha o descartam (recheck no submit-batch).
     const updated = await this.prisma.contact.updateMany({
       where: { id: input.contactId, organizationId: input.organizationId, marketingOptOutAt: null },
-      data: { marketingOptOutAt: new Date(), marketingOptOutSource: `campaign:${received.campaignId}` },
+      data: {
+        marketingOptOutAt: new Date(),
+        marketingOptOutSource: `campaign:${received.campaignId}:${negative.kind.toLowerCase()}`.slice(0, 120),
+      },
     });
+
+    // Sem resposta automática: IA desligada nesta conversa.
+    await this.prisma.conversation.update({
+      where: { id: input.conversationId },
+      data: { aiEnabled: false },
+    });
+
     if (updated.count > 0) {
+      this.logger.log(`Opt-out por resposta (${negative.kind}: "${negative.term}") contato=${input.contactId}`);
       this.realtime.emitToOrg(input.organizationId, 'contact:opted-out', {
         contactId: input.contactId,
         campaignId: received.campaignId,
+        reason: negative.kind,
       });
     }
+    return true;
   }
 
   /**

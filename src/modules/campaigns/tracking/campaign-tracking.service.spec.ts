@@ -154,7 +154,7 @@ describe('CampaignTrackingService.onInbound', () => {
     prisma.campaignRecipient.findMany.mockResolvedValue([
       sent({ campaign: { id: 'cmp1', name: 'B', replyRouting: 'AI', replyWindowDays: 7, onReplyWebhookUrl: 'https://hooks.exemplo.com/x', replyAiContext: null } }),
     ]);
-    await expect(svc.onInbound(input('oi'))).resolves.toBeUndefined();
+    await expect(svc.onInbound(input('oi'))).resolves.toEqual({ optedOut: false });
     expect(prisma.campaignRecipient.update).toHaveBeenCalledWith({
       where: { id: 'r1' },
       data: expect.objectContaining({ repliedAt: expect.any(Date) }),
@@ -224,13 +224,101 @@ describe('CampaignTrackingService.onInbound', () => {
     await a.svc.onInbound(input('SAIR'));
     expect(a.prisma.contact.updateMany).toHaveBeenCalledWith({
       where: { id: 'ct1', organizationId: 'org1', marketingOptOutAt: null },
-      data: expect.objectContaining({ marketingOptOutAt: expect.any(Date), marketingOptOutSource: 'campaign:cmp1' }),
+      data: expect.objectContaining({ marketingOptOutAt: expect.any(Date), marketingOptOutSource: 'campaign:cmp1:exact' }),
     });
     expect(a.realtime.emitToOrg).toHaveBeenCalledWith('org1', 'contact:opted-out', expect.any(Object));
 
     const b = build();
     await b.svc.onInbound(input('quero sair do plano premium'));
     expect(b.prisma.contact.updateMany).not.toHaveBeenCalled();
+  });
+
+  describe('resposta negativa por conteúdo (blacklist + fim do fluxo sem responder)', () => {
+    const received = { campaignId: 'cmp1' };
+
+    it.each(['Não tenho interesse', 'por favor tirar da lista', 'parar de me mandar mensagem', 'Parar'])(
+      '"%s": blacklist da org, IA desligada na conversa e o pipeline recebe optedOut=true',
+      async (txt) => {
+        const { svc, prisma, realtime } = build();
+        prisma.campaignRecipient.findFirst.mockResolvedValue(received);
+        const out = await svc.onInbound(input(txt));
+        expect(out).toEqual({ optedOut: true });
+        expect(prisma.contact.updateMany).toHaveBeenCalledWith({
+          where: { id: 'ct1', organizationId: 'org1', marketingOptOutAt: null },
+          data: expect.objectContaining({ marketingOptOutAt: expect.any(Date), marketingOptOutSource: expect.stringMatching(/^campaign:cmp1:/) }),
+        });
+        expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: 'conv1' }, data: { aiEnabled: false } });
+        expect(realtime.emitToOrg).toHaveBeenCalledWith('org1', 'contact:opted-out', expect.objectContaining({ contactId: 'ct1' }));
+      },
+    );
+
+    it('já estava na blacklist: ainda encerra sem responder (optedOut=true), sem evento duplicado', async () => {
+      const { svc, prisma, realtime } = build();
+      prisma.campaignRecipient.findFirst.mockResolvedValue(received);
+      prisma.contact.updateMany.mockResolvedValue({ count: 0 });
+      const out = await svc.onInbound(input('não tenho interesse'));
+      expect(out).toEqual({ optedOut: true });
+      expect(realtime.emitToOrg).not.toHaveBeenCalledWith('org1', 'contact:opted-out', expect.anything());
+    });
+
+    it('quem NÃO recebeu campanha não é blacklistado nem encerrado (cliente comum falando "parar")', async () => {
+      const { svc, prisma } = build();
+      prisma.campaignRecipient.findFirst.mockResolvedValue(null);
+      const out = await svc.onInbound(input('parar de me mandar mensagem'));
+      expect(out).toEqual({ optedOut: false });
+      expect(prisma.contact.updateMany).not.toHaveBeenCalled();
+      expect(prisma.conversation.update).not.toHaveBeenCalled();
+    });
+
+    it('lead legítimo (sem palavra negativa) segue o fluxo normal: optedOut=false', async () => {
+      const { svc, prisma } = build();
+      prisma.campaignRecipient.findFirst.mockResolvedValue(received);
+      const out = await svc.onInbound(input('Tenho interesse, pode me ligar?'));
+      expect(out).toEqual({ optedOut: false });
+      expect(prisma.contact.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('1ª resposta negativa: registra a resposta mas NÃO roteia para IA, não grava contexto e NÃO chama o webhook externo', async () => {
+      const { svc, prisma, queue } = build();
+      prisma.campaignRecipient.findMany.mockResolvedValue([
+        sent({
+          renderedText: 'Oi Acme!',
+          campaign: { id: 'cmp1', name: 'B', replyRouting: 'AI', replyWindowDays: 7, onReplyWebhookUrl: 'https://hooks.exemplo.com/x', replyAiContext: 'Ofereça demo' },
+        }),
+      ]);
+      prisma.campaignRecipient.findFirst.mockResolvedValue(received);
+      const out = await svc.onInbound(input('não tenho interesse'));
+      expect(out.optedOut).toBe(true);
+
+      // a resposta é registrada (a campanha teve retorno) e a mensagem enviada entra no histórico
+      expect(prisma.message.create).toHaveBeenCalled();
+      const upd = prisma.campaignRecipient.update.mock.calls.find((c: any[]) => c[0].data.repliedAt);
+      expect(upd[0].data.repliedAt).toBeInstanceOf(Date);
+      expect(upd[0].data).not.toHaveProperty('replyWebhookStatus');
+      // …mas nada de IA nem webhook
+      expect(queue.add).not.toHaveBeenCalled();
+      expect(prisma.conversation.update).not.toHaveBeenCalledWith({ where: { id: 'conv1' }, data: { aiEnabled: true } });
+      const withMeta = prisma.conversation.update.mock.calls.find((c: any[]) => c[0].data.metadata);
+      expect(withMeta).toBeUndefined(); // sem contexto de venda
+      // a única escrita na conversa é o desligamento da IA
+      expect(prisma.conversation.update).toHaveBeenCalledWith({ where: { id: 'conv1' }, data: { aiEnabled: false } });
+    });
+
+    it('resposta negativa DEPOIS de já ter respondido (2ª mensagem) também blacklista e encerra', async () => {
+      const { svc, prisma } = build();
+      prisma.campaignRecipient.findMany.mockResolvedValue([]); // já tinha repliedAt: não é "primeira resposta"
+      prisma.campaignRecipient.findFirst.mockResolvedValue(received);
+      const out = await svc.onInbound(input('na verdade pode tirar da lista', false));
+      expect(out).toEqual({ optedOut: true });
+      expect(prisma.contact.updateMany).toHaveBeenCalled();
+    });
+
+    it('erro no rastreio nunca derruba o inbound e NÃO encerra a conversa por engano', async () => {
+      const { svc, prisma } = build();
+      prisma.campaignRecipient.findFirst.mockRejectedValue(new Error('db down'));
+      const out = await svc.onInbound(input('parar'));
+      expect(out).toEqual({ optedOut: false });
+    });
   });
 
   it('opt-out só vale para quem recebeu campanha', async () => {
@@ -243,7 +331,7 @@ describe('CampaignTrackingService.onInbound', () => {
   it('erro no rastreio nunca derruba o inbound', async () => {
     const { svc, prisma } = build();
     prisma.campaignRecipient.findMany.mockRejectedValue(new Error('db down'));
-    await expect(svc.onInbound(input('oi'))).resolves.toBeUndefined();
+    await expect(svc.onInbound(input('oi'))).resolves.toEqual({ optedOut: false });
   });
 });
 

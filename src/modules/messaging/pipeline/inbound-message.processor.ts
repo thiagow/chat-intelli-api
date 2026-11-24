@@ -18,6 +18,7 @@ import { OutboxService } from '../../automations/outbox/outbox.service';
 import { WatchdogService } from '../../routing/watchdog/watchdog.service';
 import { SalesRecoveryService } from '../../sales-recovery/sales-recovery.service';
 import { CampaignTrackingService } from '../../campaigns/tracking/campaign-tracking.service';
+import { ConversationFsmService } from '../conversations/conversation-fsm.service';
 import {
   AutomationTrigger,
   ChannelType,
@@ -103,6 +104,7 @@ export class InboundMessageProcessor extends WorkerHost {
     private readonly salesRecovery: SalesRecoveryService,
     private readonly campaignTracking: CampaignTrackingService,
     @InjectQueue('chatbot-processor') private readonly chatbotQueue: Queue,
+    private readonly conversationFsm: ConversationFsmService,
   ) {
     super();
   }
@@ -246,10 +248,13 @@ export class InboundMessageProcessor extends WorkerHost {
           : undefined,
       );
 
+      // Resposta negativa a uma campanha ("parar", "não tenho interesse", "tirar da lista"): o contato foi
+      // para a blacklist e o fluxo ENCERRA sem responder — nada de IA, chatbot nem automações abaixo.
+      let optedOut = false;
       if (!message.isEcho) {
         // Resposta a uma campanha: materializa a mensagem da campanha na
         // conversa, aplica o roteamento (IA/humano) e trata opt-out.
-        await this.campaignTracking.onInbound({
+        const outcome = await this.campaignTracking.onInbound({
           organizationId,
           channelId,
           contactId,
@@ -257,6 +262,7 @@ export class InboundMessageProcessor extends WorkerHost {
           conversationIsFresh: conversationIsNew || conversationWasReopened,
           text: msgText,
         });
+        optedOut = !!outcome?.optedOut;
       }
 
       const isEcho = !!message.isEcho;
@@ -293,7 +299,8 @@ export class InboundMessageProcessor extends WorkerHost {
           `;
           if (
             result.isNew &&
-            direction === MessageDirection.INBOUND
+            direction === MessageDirection.INBOUND &&
+            !optedOut // automações de "mensagem recebida" poderiam responder a quem pediu para sair
           ) {
             const content = (message.content ?? {}) as Record<string, any>;
             const body =
@@ -339,6 +346,7 @@ export class InboundMessageProcessor extends WorkerHost {
 
       if (
         !isEcho &&
+        !optedOut &&
         (status === ConversationStatus.BOT ||
           status === ConversationStatus.PENDING)
       ) {
@@ -375,10 +383,22 @@ export class InboundMessageProcessor extends WorkerHost {
       );
       if (webhookEventId) await this.webhookEvents.markProcessed(webhookEventId);
 
+      // Opt-out por resposta: encerra a conversa SEM responder (pela FSM, que audita e emite o evento).
+      // O watchdog (SLA de "ninguém respondeu") não faz sentido aqui, então nem é agendado.
+      if (optedOut) {
+        await this.conversationFsm
+          .transition(conversationId, ConversationStatus.CLOSED, undefined, { reason: 'campaign_opt_out' })
+          .catch((err) =>
+            this.logger.warn(
+              `Opt-out: não foi possível encerrar a conversa ${conversationId} (${err?.message ?? err}); IA já está desligada nela`,
+            ),
+          );
+      }
+
       // Watchdog: cliente mandou mensagem nova → agenda timer pra detectar
       // se ninguém respondeu na janela. Echo (msg da gente que voltou via
       // webhook) não conta — essas vão pelo path OUTBOUND e cancelam.
-      if (!isEcho && direction === MessageDirection.INBOUND) {
+      if (!isEcho && !optedOut && direction === MessageDirection.INBOUND) {
         this.watchdog.scheduleCheck(conversationId).catch((err) =>
           this.logger.warn(
             `Watchdog scheduleCheck failed for conv ${conversationId}: ${err?.message ?? err}`,
@@ -405,7 +425,7 @@ export class InboundMessageProcessor extends WorkerHost {
       // instead of seeing "[audio]" and apologizing it can't listen. Cost
       // is ~$0.006/min — predictable and pays for itself the moment the
       // bot answers a single audio without bouncing the customer to text.
-      if (!isEcho) {
+      if (!isEcho && !optedOut) {
         const dispatch = async () => {
           if (savedMessage.type === PrismaContentType.AUDIO) {
             try {
