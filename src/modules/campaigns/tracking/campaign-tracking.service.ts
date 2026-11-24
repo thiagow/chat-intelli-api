@@ -24,6 +24,18 @@ const RANK: Partial<Record<CampaignRecipientStatus, number>> = {
 
 const SENT_LIKE: CampaignRecipientStatus[] = ['SENT', 'DELIVERED', 'READ'];
 
+/**
+ * "Este destinatário é enviado por este canal": o chip atribuído no rodízio ou, em registro legado sem chip,
+ * o canal primário da campanha. Eco, resposta e status chegam pelo chip que ENVIOU — filtrar só pelo canal
+ * primário deixaria o eco dos demais chips vazar para o inbox e a resposta criaria contato duplicado.
+ */
+const viaChannel = (channelId: string): Prisma.CampaignRecipientWhereInput => ({
+  OR: [
+    { channelId, campaign: { deletedAt: null } },
+    { channelId: null, campaign: { channelId, deletedAt: null } },
+  ],
+});
+
 export interface CampaignEchoInput {
   organizationId: string;
   channelId: string;
@@ -85,7 +97,7 @@ export class CampaignTrackingService {
         status: { in: ['QUEUED', ...SENT_LIKE] },
         repliedAt: null,
         renderedText: { not: null },
-        campaign: { channelId: input.channelId, deletedAt: null },
+        AND: [viaChannel(input.channelId)],
         batch: { status: { in: ['SUBMITTING', 'SCHEDULED', 'RUNNING', 'DONE'] } },
         OR: [{ providerMessageId: null }, { providerMessageId: input.externalMessageId }],
       },
@@ -129,7 +141,7 @@ export class CampaignTrackingService {
         contactId: input.contactId,
         status: { in: SENT_LIKE },
         repliedAt: null,
-        campaign: { channelId: input.channelId, deletedAt: null },
+        AND: [viaChannel(input.channelId)],
       },
       include: {
         campaign: {
@@ -334,7 +346,7 @@ export class CampaignTrackingService {
     const recipient = await this.prisma.campaignRecipient.findFirst({
       where: {
         providerMessageId: params.providerMessageId,
-        campaign: { channelId: params.channelId },
+        AND: [viaChannel(params.channelId)],
         ...(params.organizationId && { organizationId: params.organizationId }),
       },
     });

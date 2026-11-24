@@ -2,7 +2,9 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { CampaignConsentSource, CampaignReplyRouting, CampaignRecipientStatus } from '@prisma/client';
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayNotEmpty,
+  ValidateNested,
   IsArray,
   IsBoolean,
   IsDateString,
@@ -227,4 +229,26 @@ export class PreviewCampaignQueryDto {
   @Transform(({ value }) => (value === undefined ? undefined : value === 'true' || value === true))
   @IsBoolean()
   footer?: boolean;
+}
+
+export class CampaignChannelItemDto {
+  @ApiProperty()
+  @IsString()
+  channelId!: string;
+
+  @ApiProperty({ description: 'Teto diário deste chip (também é o peso do rodízio)' })
+  @IsInt()
+  @Min(1)
+  @Max(CAMPAIGN_LIMITS.maxDailyCap)
+  dailyLimit!: number;
+}
+
+export class SetCampaignChannelsDto {
+  @ApiProperty({ type: [CampaignChannelItemDto], description: 'Chips do rodízio. Precisa incluir o canal primário.' })
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(CAMPAIGN_LIMITS.maxChips)
+  @ValidateNested({ each: true })
+  @Type(() => CampaignChannelItemDto)
+  channels!: CampaignChannelItemDto[];
 }

@@ -12,7 +12,12 @@ function build() {
     campaign: { findFirst: jest.fn().mockResolvedValue(campaign) },
     channel: { findFirst: jest.fn().mockResolvedValue({ id: 'ch1', type: 'WHATSAPP_UAZAPI' }) },
     organization: { findUnique: jest.fn().mockResolvedValue({ aiTimezone: 'America/Sao_Paulo' }) },
-    campaignRecipient: { findMany: jest.fn().mockResolvedValue([{ id: 'r1' }]) },
+    campaignRecipient: { findMany: jest.fn().mockResolvedValue([{ id: 'r1' }]), groupBy: jest.fn().mockResolvedValue([]) },
+    campaignChannel: {
+      findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn().mockResolvedValue(null),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
     $transaction: jest.fn(),
   };
   const bulk: any = { isConnected: jest.fn().mockResolvedValue(true), ensureWebhook: jest.fn() };
@@ -120,6 +125,158 @@ describe('CampaignsService', () => {
       prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), onReplyWebhookUrl: null, onReplyWebhookSecret: null });
       await expect(svc.testWebhook('org1', 'cmp1', 'ALL')).rejects.toThrow(ConflictException);
       expect(replyWebhook.sendTest).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('rodízio entre chips', () => {
+    const chipChannel = (id: string, over: Record<string, any> = {}) => ({
+      id, name: `Chip ${id}`, type: 'WHATSAPP_UAZAPI', organizationId: 'org1', isActive: true, deletedAt: null, ...over,
+    });
+
+    /** Campanha READY com 2 chips (ch1 primário + ch2) e N destinatários válidos. */
+    function multi(n = 6) {
+      const ctx = build();
+      const { prisma } = ctx;
+      prisma.campaign.findFirst.mockResolvedValue({
+        id: 'cmp1', organizationId: 'org1', channelId: 'ch1', status: 'READY',
+        dailyCap: 20, batchSize: 5, batchSizeMin: 5, startJitterMaxMin: 0, batchPauseMinSec: 60, batchPauseMaxSec: 120,
+        sendWindowStart: '00:00', sendWindowEnd: '23:59', sendWeekdays: [0, 1, 2, 3, 4, 5, 6],
+        delayMinSec: 30, delayMaxSec: 90, scheduledAt: null,
+      });
+      prisma.channel.findFirst.mockResolvedValue(chipChannel('ch1'));
+      prisma.campaignChannel.findMany.mockResolvedValue([{ channelId: 'ch2', dailyLimit: 20, position: 1, channel: chipChannel('ch2') }]);
+      prisma.campaignRecipient.findMany.mockResolvedValue(Array.from({ length: n }, (_, i) => ({ id: `r${i}` })));
+      const created: any[] = [];
+      const recUpdates: any[] = [];
+      const tx: any = {
+        $executeRaw: jest.fn().mockResolvedValue(1),
+        campaignChannel: { findFirst: jest.fn().mockResolvedValue(null) },
+        campaign: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+        campaignBatch: {
+          create: jest.fn().mockImplementation(async ({ data }: any) => {
+            const row = { id: `b${created.length}`, scheduledFor: data.scheduledFor, ...data };
+            created.push(row);
+            return row;
+          }),
+        },
+        campaignRecipient: { updateMany: jest.fn().mockImplementation(async (a: any) => { recUpdates.push(a); return { count: 1 }; }) },
+      };
+      prisma.$transaction.mockImplementation(async (fn: any) => fn(tx));
+      return { ...ctx, tx, created, recUpdates };
+    }
+
+    it('start: cada chip recebe a sua cadeia de lotes, com channelId, e os destinatários são intercalados', async () => {
+      const { svc, created, recUpdates, engine } = multi(6);
+      const out = await svc.start('org1', 'cmp1', 'ALL');
+      expect(out.chips).toBe(2);
+      // índices únicos e contínuos na campanha, lotes de AMBOS os chips
+      expect(created.map((b) => b.batchIndex)).toEqual(created.map((_, i) => i));
+      expect(new Set(created.map((b) => b.channelId))).toEqual(new Set(['ch1', 'ch2']));
+      // recipients marcados com o chip dono
+      const byChip = new Map<string, string[]>();
+      for (const u of recUpdates) {
+        const list = byChip.get(u.data.channelId) ?? [];
+        list.push(...u.where.id.in);
+        byChip.set(u.data.channelId, list);
+      }
+      expect(byChip.get('ch1')!.sort()).toEqual(['r0', 'r2', 'r4']); // round-robin intercalado
+      expect(byChip.get('ch2')!.sort()).toEqual(['r1', 'r3', 'r5']);
+      expect(engine.scheduleSubmit).toHaveBeenCalledTimes(created.length);
+    });
+
+    it('start: com 1 chip o comportamento é o de sempre (um chip, channelId do primário)', async () => {
+      const { svc, prisma, created } = multi(4);
+      prisma.campaignChannel.findMany.mockResolvedValue([]);
+      const out = await svc.start('org1', 'cmp1', 'ALL');
+      expect(out.chips).toBe(1);
+      expect(created.every((b) => b.channelId === 'ch1')).toBe(true);
+    });
+
+    it('start: um chip desconectado bloqueia e diz QUAL (não deixa outro número esperando em silêncio)', async () => {
+      const { svc, engine } = multi(4);
+      const bulk = engine.bulkFor();
+      bulk.isConnected.mockImplementation(async (ch: any) => ch.id !== 'ch2');
+      await expect(svc.start('org1', 'cmp1', 'ALL')).rejects.toThrow(/Chip ch2.*desconectado/);
+    });
+
+    it('start: aplica a trava consultiva por chip e recusa se outro chip já está em campanha ativa', async () => {
+      const { svc, tx } = multi(4);
+      tx.campaignChannel.findFirst.mockResolvedValue({ channel: { name: 'Chip ch2' } });
+      await expect(svc.start('org1', 'cmp1', 'ALL')).rejects.toThrow(/Chip ch2.*campanha ativa/);
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(2); // uma trava por chip, antes da contagem
+      expect(tx.campaign.updateMany).not.toHaveBeenCalled(); // nada inicia
+    });
+
+    it('start: o chip não pode estar inativo, de outra org ou sem acesso do usuário', async () => {
+      const a = multi(4);
+      a.prisma.campaignChannel.findMany.mockResolvedValue([{ channelId: 'ch2', dailyLimit: 20, position: 1, channel: chipChannel('ch2', { isActive: false }) }]);
+      await expect(a.svc.start('org1', 'cmp1', 'ALL')).rejects.toThrow(/não está disponível/);
+
+      const b = multi(4);
+      b.prisma.campaignChannel.findMany.mockResolvedValue([{ channelId: 'ch2', dailyLimit: 20, position: 1, channel: chipChannel('ch2', { organizationId: 'outra' }) }]);
+      await expect(b.svc.start('org1', 'cmp1', 'ALL')).rejects.toThrow(/não está disponível/);
+    });
+
+    it('setChannels: exige o chip primário, recusa repetido e valida cada canal', async () => {
+      const { svc, prisma } = multi(4);
+      prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), status: 'DRAFT' });
+      await expect(svc.setChannels('org1', 'cmp1', 'ALL', { channels: [{ channelId: 'ch2', dailyLimit: 10 }] })).rejects.toThrow(/primário/);
+      await expect(
+        svc.setChannels('org1', 'cmp1', 'ALL', { channels: [{ channelId: 'ch1', dailyLimit: 10 }, { channelId: 'ch1', dailyLimit: 10 }] }),
+      ).rejects.toThrow(/repetido/);
+      prisma.channel.findMany = jest.fn().mockResolvedValue([chipChannel('ch1')]); // ch2 não existe/inativo
+      await expect(
+        svc.setChannels('org1', 'cmp1', 'ALL', { channels: [{ channelId: 'ch1', dailyLimit: 10 }, { channelId: 'ch2', dailyLimit: 10 }] }),
+      ).rejects.toThrow(/não foi encontrado/);
+    });
+
+    it('setChannels: só antes de iniciar e canal sem bulk sender é recusado', async () => {
+      const { svc, prisma, registry } = multi(4);
+      prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), status: 'RUNNING' });
+      await expect(svc.setChannels('org1', 'cmp1', 'ALL', { channels: [{ channelId: 'ch1', dailyLimit: 10 }] })).rejects.toThrow(/antes de iniciar/);
+
+      prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), status: 'DRAFT' });
+      prisma.channel.findMany = jest.fn().mockResolvedValue([chipChannel('ch1'), chipChannel('ch2')]);
+      registry.hasBulkSender.mockImplementation((t: string) => t === 'WHATSAPP_UAZAPI');
+      prisma.channel.findMany.mockResolvedValue([chipChannel('ch1'), chipChannel('ch2', { type: 'GMAIL' })]);
+      await expect(
+        svc.setChannels('org1', 'cmp1', 'ALL', { channels: [{ channelId: 'ch1', dailyLimit: 10 }, { channelId: 'ch2', dailyLimit: 10 }] }),
+      ).rejects.toThrow(/não suporta envio em massa/);
+    });
+
+    it('setChannels: grava o rodízio e o teto do primário vira Campaign.dailyCap', async () => {
+      const { svc, prisma } = multi(4);
+      prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), status: 'DRAFT' });
+      prisma.channel.findMany = jest.fn().mockResolvedValue([chipChannel('ch1'), chipChannel('ch2')]);
+      const tx: any = {
+        campaignChannel: { deleteMany: jest.fn(), upsert: jest.fn() },
+        campaign: { update: jest.fn() },
+      };
+      prisma.$transaction.mockImplementation(async (fn: any) => fn(tx));
+      prisma.campaignRecipient.count = jest.fn().mockResolvedValue(0);
+      prisma.campaignChannel.findMany.mockResolvedValue([]);
+      await svc.setChannels('org1', 'cmp1', 'ALL', { channels: [{ channelId: 'ch1', dailyLimit: 30 }, { channelId: 'ch2', dailyLimit: 15 }] });
+      expect(tx.campaignChannel.deleteMany).toHaveBeenCalledWith({ where: { campaignId: 'cmp1', channelId: { notIn: ['ch1', 'ch2'] } } });
+      expect(tx.campaignChannel.upsert).toHaveBeenCalledTimes(2);
+      expect(tx.campaign.update).toHaveBeenCalledWith({ where: { id: 'cmp1' }, data: { dailyCap: 30 } });
+    });
+
+    it('estimate com 2 chips: cada um com o seu teto, chips em paralelo (menos dias que 1 chip só)', async () => {
+      const { svc, prisma } = multi(400);
+      prisma.campaignRecipient.count = jest.fn().mockResolvedValue(400);
+      prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), status: 'DRAFT', dailyCap: 100 });
+      prisma.campaign.update = jest.fn().mockImplementation(async ({ data }: any) => ({
+        id: 'cmp1', organizationId: 'org1', channelId: 'ch1', dailyCap: 100, batchSize: 20, batchSizeMin: 20, startJitterMaxMin: 0,
+        batchPauseMinSec: 60, batchPauseMaxSec: 120, sendWindowStart: '00:00', sendWindowEnd: '23:59',
+        sendWeekdays: [0, 1, 2, 3, 4, 5, 6], delayMinSec: 30, delayMaxSec: 90, scheduledAt: null, ...data,
+      }));
+      prisma.campaignChannel.findMany.mockResolvedValue([{ channelId: 'ch2', dailyLimit: 100 }]);
+      const two: any = await svc.update('org1', 'cmp1', 'ALL', { name: 'x' } as any);
+      prisma.campaignChannel.findMany.mockResolvedValue([]);
+      const one: any = await svc.update('org1', 'cmp1', 'ALL', { name: 'x' } as any);
+      expect(two.estimate.chips).toBe(2);
+      expect(one.estimate.chips).toBe(1);
+      expect(two.estimate.days).toBeLessThan(one.estimate.days);
     });
   });
 });

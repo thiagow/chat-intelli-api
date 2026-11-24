@@ -335,4 +335,96 @@ describe('CampaignsEngine.finalizeBatch', () => {
     expect(order.indexOf('carry')).toBeGreaterThanOrEqual(0);
     expect(order.indexOf('carry')).toBeLessThan(order.indexOf('batch:DONE'));
   });
+
+describe('CampaignsEngine — rodízio entre chips', () => {
+  const chip2 = { id: 'ch2', name: 'Chip 2', type: 'WHATSAPP_UAZAPI', organizationId: 'org1' };
+
+  it('submitBatch usa o canal do LOTE (chip 2), não o primário: pasta, contatos e parada no mesmo chip', async () => {
+    const { engine, prisma, bulk, provisioning, createFolder } = build();
+    prisma.channel = { findUnique: jest.fn().mockResolvedValue(chip2) };
+    prisma.campaignBatch.findUnique.mockResolvedValue({
+      id: 'b2', campaignId: 'cmp1', batchIndex: 3, status: 'PLANNED', providerFolderId: null, channelId: 'ch2', scheduledFor: new Date(),
+    });
+    await engine.submitBatch('cmp1', 'b2');
+    expect(bulk.listFolders).toHaveBeenCalledWith(chip2);
+    expect(createFolder).toHaveBeenCalledWith(chip2, expect.anything());
+    // contato provisionado NO chip que envia (a resposta chega por ele)
+    expect(provisioning.provision).toHaveBeenCalledWith('org1', 'ch2', 'WHATSAPP_UAZAPI', expect.anything());
+  });
+
+  it('o "lote anterior" é o do MESMO chip: a busca é filtrada por channelId', async () => {
+    const { engine, prisma } = build();
+    prisma.channel = { findUnique: jest.fn().mockResolvedValue(chip2) };
+    prisma.campaignBatch.findUnique.mockResolvedValue({
+      id: 'b2', campaignId: 'cmp1', batchIndex: 3, status: 'PLANNED', providerFolderId: null, channelId: 'ch2', scheduledFor: new Date(),
+    });
+    await engine.submitBatch('cmp1', 'b2');
+    const where = prisma.campaignBatch.findFirst.mock.calls[0][0].where;
+    expect(where).toMatchObject({ campaignId: 'cmp1', channelId: 'ch2', batchIndex: { lt: 3 } });
+  });
+
+  it('lote do chip 2 ativo não trava o chip 1 (cadeias independentes)', async () => {
+    const { engine, prisma, createFolder } = build();
+    // o único "anterior" do chip 1 (índice menor) já terminou; o chip 2 tem lote ativo, mas é outra cadeia
+    prisma.campaignBatch.findFirst.mockResolvedValue({ id: 'b0', status: 'DONE', completedAt: new Date(Date.now() - 3_600_000) });
+    prisma.campaignBatch.findUnique.mockResolvedValue({
+      id: 'b1', campaignId: 'cmp1', batchIndex: 1, status: 'PLANNED', providerFolderId: null, channelId: 'ch1', scheduledFor: new Date(),
+    });
+    await engine.submitBatch('cmp1', 'b1');
+    expect(createFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it('pausa por desconexão de um chip diz qual caiu; um chip saudável não pausa', async () => {
+    const { engine, prisma, bulk } = build();
+    prisma.channel = { findUnique: jest.fn().mockResolvedValue(chip2) };
+    prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), status: 'RUNNING' });
+    prisma.campaignBatch.findMany.mockResolvedValue([
+      { id: 'b1', campaignId: 'cmp1', channelId: 'ch1', providerFolderId: 'F1', status: 'RUNNING' },
+      { id: 'b2', campaignId: 'cmp1', channelId: 'ch2', providerFolderId: 'F2', status: 'RUNNING' },
+    ]);
+    bulk.isConnected.mockImplementation(async (ch: any) => ch.id !== 'ch2');
+    await engine.reconcileCampaign('cmp1');
+    expect(prisma.campaign.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: 'PAUSED', autoPausedReason: 'CHANNEL_DISCONNECTED:Chip 2' } }),
+    );
+  });
+
+  it('taxa de falha é por chip: um chip ruim pausa mesmo com o outro saudável diluindo a média', async () => {
+    const { engine, prisma } = build();
+    prisma.channel = { findUnique: jest.fn().mockResolvedValue(chip2) };
+    prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), status: 'RUNNING' });
+    prisma.campaignBatch.findMany.mockResolvedValue([
+      { id: 'b2', campaignId: 'cmp1', channelId: 'ch2', providerFolderId: 'F2', status: 'RUNNING' },
+    ]);
+    prisma.campaignRecipient.groupBy.mockResolvedValue([
+      { channelId: 'ch1', status: 'SENT', _count: { _all: 200 } }, // saudável
+      { channelId: 'ch2', status: 'SENT', _count: { _all: 20 } },
+      { channelId: 'ch2', status: 'FAILED', _count: { _all: 20 } }, // 50% de falha
+    ]);
+    await engine.reconcileCampaign('cmp1');
+    expect(prisma.campaign.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: 'PAUSED', autoPausedReason: 'FAILURE_RATE:Chip 2' } }),
+    );
+  });
+
+  it('pause/cancel param a pasta no canal de cada lote', async () => {
+    const { engine, prisma, bulk } = build();
+    prisma.channel = { findUnique: jest.fn().mockResolvedValue(chip2) };
+    prisma.campaign.findFirst.mockResolvedValue({ ...(await prisma.campaign.findFirst()), status: 'RUNNING' });
+    prisma.campaignBatch.findMany.mockResolvedValue([
+      { id: 'b1', channelId: 'ch1', providerFolderId: 'F1', status: 'RUNNING' },
+      { id: 'b2', channelId: 'ch2', providerFolderId: 'F2', status: 'RUNNING' },
+    ]);
+    await engine.pauseCampaign('cmp1', null);
+    const calls = bulk.controlFolder.mock.calls.map((c: any[]) => [c[0].id, c[1], c[2]]);
+    expect(calls).toEqual(expect.arrayContaining([['ch1', 'F1', 'stop'], ['ch2', 'F2', 'stop']]));
+  });
+
+  it('evento "sender" é do chip que recebeu o webhook (lote do chip ou, legado, canal primário)', async () => {
+    const { engine, prisma } = build();
+    prisma.campaignBatch.findFirst.mockResolvedValue(null);
+    await engine.handleSenderEvent('ch2', { folderId: 'F2', status: 'done' });
+    const where = prisma.campaignBatch.findFirst.mock.calls[0][0].where;
+    expect(where.OR).toEqual([{ channelId: 'ch2' }, { channelId: null, campaign: { channelId: 'ch2' } }]);
+  });
 });

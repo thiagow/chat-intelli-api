@@ -5,6 +5,7 @@ import {
   HttpCode,
   Param,
   Patch,
+  Put,
   Post,
   Query,
   UploadedFile,
@@ -24,6 +25,7 @@ import {
   ListCampaignsQueryDto,
   ListRecipientsQueryDto,
   PreviewCampaignQueryDto,
+  SetCampaignChannelsDto,
   UpdateCampaignDto,
 } from './dto/campaign.dto';
 
@@ -107,6 +109,18 @@ export class CampaignsController {
     @Body() dto: UpdateCampaignDto,
   ) {
     return this.service.update(orgId, id, access, dto);
+  }
+
+  @Put(':id/channels')
+  @Roles(OrgRole.OWNER, OrgRole.ADMIN)
+  @ApiOperation({ summary: 'Define os chips (canais) do rodízio e o teto diário de cada um (antes de iniciar)' })
+  setChannels(
+    @Param('id') id: string,
+    @CurrentOrg('id') orgId: string,
+    @CurrentChannelAccess() access: ChannelAccess,
+    @Body() dto: SetCampaignChannelsDto,
+  ) {
+    return this.service.setChannels(orgId, id, access, dto);
   }
 
   @Post(':id/start')

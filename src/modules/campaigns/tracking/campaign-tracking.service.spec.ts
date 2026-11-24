@@ -76,7 +76,15 @@ describe('CampaignTrackingService.tryConsumeEcho', () => {
     const where = prisma.campaignRecipient.findMany.mock.calls[0][0].where;
     expect(where.organizationId).toBe('org1');
     expect(where.contactId).toBe('ct1');
-    expect(where.campaign).toEqual({ channelId: 'ch1', deletedAt: null });
+    // chip atribuído OU (legado, sem chip) o canal primário da campanha
+    expect(where.AND).toEqual([
+      {
+        OR: [
+          { channelId: 'ch1', campaign: { deletedAt: null } },
+          { channelId: null, campaign: { channelId: 'ch1', deletedAt: null } },
+        ],
+      },
+    ]);
   });
 });
 
@@ -246,7 +254,14 @@ describe('CampaignTrackingService.applyStatus', () => {
     await svc.applyStatus({ channelId: 'ch1', organizationId: 'org1', providerMessageId: 'WA1', status: 'DELIVERED' as any });
     expect(prisma.campaignRecipient.findFirst.mock.calls[0][0].where).toEqual({
       providerMessageId: 'WA1',
-      campaign: { channelId: 'ch1' },
+      AND: [
+        {
+          OR: [
+            { channelId: 'ch1', campaign: { deletedAt: null } },
+            { channelId: null, campaign: { channelId: 'ch1', deletedAt: null } },
+          ],
+        },
+      ],
       organizationId: 'org1',
     });
     expect(prisma.campaignRecipient.update).not.toHaveBeenCalled();

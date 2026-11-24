@@ -21,6 +21,8 @@ export const CAMPAIGN_LIMITS = {
   maxExtraColumns: 20,
   maxExtraValueChars: 500,
   maxDailyCap: 1000,
+  /** Máximo de chips (canais) num rodízio. */
+  maxChips: 10,
   /** Lote = uma pasta na UaZAPI; lotes menores espalham melhor o envio. */
   maxBatchSize: 500,
   minBatchPauseSec: 60,

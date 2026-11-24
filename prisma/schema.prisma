@@ -316,6 +316,7 @@ model Channel {
   segmentMemberships SegmentChannel[]
   primaryOfSegments  Segment[]            @relation("SegmentPrimaryChannel")
   campaigns          Campaign[]
+  campaignChannels   CampaignChannel[]
 
   @@index([organizationId, type], name: "idx_channel_org_type")
   @@map("channels")
@@ -1921,6 +1922,8 @@ model Campaign {
   createdBy    User?               @relation("CampaignCreator", fields: [createdById], references: [id], onDelete: SetNull)
   batches      CampaignBatch[]
   recipients   CampaignRecipient[]
+  /// Chips (canais) do rodízio. Sempre inclui o canal primário (`channelId`).
+  channels     CampaignChannel[]
 
   @@index([organizationId, status], name: "idx_campaign_org_status")
   @@index([channelId, status], name: "idx_campaign_channel_status")
@@ -1934,6 +1937,8 @@ model CampaignBatch {
   scheduledFor     DateTime            @map("scheduled_for")
   status           CampaignBatchStatus @default(PLANNED)
   providerFolderId String?             @unique @map("provider_folder_id")
+  /// Chip que envia este lote (null = canal primário da campanha, legado).
+  channelId        String?             @map("channel_id")
   recipientCount   Int                 @default(0) @map("recipient_count")
   submittedAt      DateTime?           @map("submitted_at")
   completedAt      DateTime?           @map("completed_at")
@@ -1943,6 +1948,7 @@ model CampaignBatch {
   recipients CampaignRecipient[]
 
   @@unique([campaignId, batchIndex], name: "uq_campaign_batch_index")
+  @@index([campaignId, channelId], name: "idx_campaign_batch_chip")
   @@map("campaign_batches")
 }
 
@@ -1967,6 +1973,8 @@ model CampaignRecipient {
   conversationId    String?                 @map("conversation_id")
   messageId         String?                 @map("message_id")
   providerMessageId String?                 @map("provider_message_id")
+  /// Chip atribuído a este destinatário (null = canal primário da campanha, legado).
+  channelId         String?                 @map("channel_id")
   error             String?
   sentAt            DateTime?               @map("sent_at")
   deliveredAt       DateTime?               @map("delivered_at")
@@ -1988,7 +1996,26 @@ model CampaignRecipient {
   @@unique([campaignId, phoneE164], name: "uq_campaign_recipient_phone")
   @@index([campaignId, status], name: "idx_campaign_recipient_status")
   @@index([providerMessageId], name: "idx_campaign_recipient_provider_msg")
+  @@index([channelId], name: "idx_campaign_recipient_chip")
   @@index([contactId, status], name: "idx_campaign_recipient_contact")
   @@index([batchId], name: "idx_campaign_recipient_batch")
   @@map("campaign_recipients")
+}
+
+/// Chip (canal UaZAPI) participante do rodízio de uma campanha. O canal primário também tem linha.
+model CampaignChannel {
+  id         String   @id @default(cuid())
+  campaignId String   @map("campaign_id")
+  channelId  String   @map("channel_id")
+  /// Teto diário deste chip. Para o chip primário, `Campaign.dailyCap` é a fonte da verdade.
+  dailyLimit Int      @default(200) @map("daily_limit")
+  position   Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  channel  Channel  @relation(fields: [channelId], references: [id])
+
+  @@unique([campaignId, channelId], name: "uq_campaign_channel")
+  @@index([channelId], name: "idx_campaign_channel_channel")
+  @@map("campaign_channels")
 }

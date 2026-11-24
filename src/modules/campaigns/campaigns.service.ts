@@ -8,25 +8,26 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Campaign, CampaignRecipientStatus, Prisma } from '@prisma/client';
+import { Campaign, CampaignRecipientStatus, Channel, Prisma } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../../database/prisma.service';
 import { ChannelAdapterRegistry } from '../channel-hub/channel-adapter.registry';
 import { ChannelAccess, ChannelAccessService } from '../iam/channel-access/channel-access.service';
 import { normalizePhone } from '../../common/phone/phone-normalizer';
-import { planBatches } from './batching/campaign-batch-planner';
+import { planChips, summarizeChipPlans } from './batching/campaign-chip-planner';
 import { parseCampaignCsv } from './csv/campaign-csv.parser';
 import { extractVariables, renderCampaignMessage } from './campaign-text';
 import { randomBytes } from 'node:crypto';
 import { assertSafeHttpsUrl, UnsafeUrlError } from '../../common/net/safe-fetch';
 import { ReplyWebhookService } from './reply-webhook.service';
 import { CampaignsEngine } from './campaigns.engine';
-import { CAMPAIGNS_QUEUE, CAMPAIGN_JOBS, CAMPAIGN_LIMITS } from './campaigns.constants';
+import { ACTIVE_CAMPAIGN_STATUSES, CAMPAIGNS_QUEUE, CAMPAIGN_JOBS, CAMPAIGN_LIMITS } from './campaigns.constants';
 import {
   ImportCampaignDto,
   ListCampaignsQueryDto,
   ListRecipientsQueryDto,
   PreviewCampaignQueryDto,
+  SetCampaignChannelsDto,
   UpdateCampaignDto,
 } from './dto/campaign.dto';
 
@@ -126,7 +127,14 @@ export class CampaignsService {
       this.prisma.campaignBatch.findMany({ where: { campaignId: id }, orderBy: { batchIndex: 'asc' } }),
       this.prisma.channel.findUnique({ where: { id: campaign.channelId }, select: { id: true, name: true, type: true } }),
     ]);
-    return { ...maskCampaign(campaign), stats, batches, channel, estimate: await this.estimate(campaign) };
+    return {
+      ...maskCampaign(campaign),
+      stats,
+      batches,
+      channel,
+      channels: await this.chipBreakdown(campaign),
+      estimate: await this.estimate(campaign),
+    };
   }
 
   /** Pré-visualização: mesma renderização do envio, com sementes de amostra diferentes. */
@@ -195,6 +203,53 @@ export class CampaignsService {
   }
 
   /** Duração estimada considerando teto efetivo, janela e dias. */
+  /** Chips da campanha: o primário (teto = `Campaign.dailyCap`) + os demais do rodízio. */
+  private async chipSpecs(campaign: Campaign): Promise<Array<{ channelId: string; dailyLimit: number }>> {
+    const rows = await this.prisma.campaignChannel.findMany({
+      where: { campaignId: campaign.id, channelId: { not: campaign.channelId } },
+      orderBy: { position: 'asc' },
+      select: { channelId: true, dailyLimit: true },
+    });
+    return [{ channelId: campaign.channelId, dailyLimit: campaign.dailyCap }, ...rows];
+  }
+
+  /** Progresso por chip para o detalhe da campanha. */
+  private async chipBreakdown(campaign: Campaign) {
+    const [rows, groups] = await Promise.all([
+      this.prisma.campaignChannel.findMany({
+        where: { campaignId: campaign.id },
+        orderBy: { position: 'asc' },
+        include: { channel: { select: { id: true, name: true, type: true } } },
+      }),
+      this.prisma.campaignRecipient.groupBy({
+        by: ['channelId', 'status'],
+        where: { campaignId: campaign.id },
+        orderBy: [{ channelId: 'asc' }, { status: 'asc' }],
+        _count: { _all: true },
+      } as never) as unknown as Promise<Array<{ channelId: string | null; status: string; _count: { _all: number } }>>,
+    ]);
+    const stats = new Map<string, Record<string, number>>();
+    for (const g of groups) {
+      const key = g.channelId ?? campaign.channelId;
+      const cur = stats.get(key) ?? { queued: 0, sent: 0, delivered: 0, read: 0, failed: 0 };
+      const n = g._count._all;
+      if (g.status === 'QUEUED') cur.queued += n;
+      if (['SENT', 'DELIVERED', 'READ'].includes(g.status)) cur.sent += n;
+      if (['DELIVERED', 'READ'].includes(g.status)) cur.delivered += n;
+      if (g.status === 'READ') cur.read += n;
+      if (g.status === 'FAILED') cur.failed += n;
+      stats.set(key, cur);
+    }
+    return rows.map((r) => ({
+      channelId: r.channelId,
+      name: r.channel.name,
+      type: r.channel.type,
+      isPrimary: r.channelId === campaign.channelId,
+      dailyLimit: r.channelId === campaign.channelId ? campaign.dailyCap : r.dailyLimit,
+      stats: stats.get(r.channelId) ?? { queued: 0, sent: 0, delivered: 0, read: 0, failed: 0 },
+    }));
+  }
+
   private async estimate(campaign: Campaign) {
     const sendable = await this.prisma.campaignRecipient.count({
       where: { campaignId: campaign.id, status: { in: ['PENDING', 'VALID'] } },
@@ -204,9 +259,8 @@ export class CampaignsService {
       select: { aiTimezone: true },
     });
     try {
-      const plan = planBatches({
-        recipientCount: sendable,
-        dailyCap: campaign.dailyCap,
+      const chips = await this.chipSpecs(campaign);
+      const plans = planChips(chips, sendable, {
         windowStart: campaign.sendWindowStart,
         windowEnd: campaign.sendWindowEnd,
         weekdays: campaign.sendWeekdays,
@@ -220,18 +274,64 @@ export class CampaignsService {
         batchPauseMinSec: campaign.batchPauseMinSec,
         batchPauseMaxSec: campaign.batchPauseMaxSec,
       });
+      const sum = summarizeChipPlans(plans);
       return {
         recipients: sendable,
-        days: plan.days,
-        batches: plan.batches.length,
-        effectiveDailyCap: plan.effectiveDailyCap,
-        capLimitedByWindow: plan.capLimitedByWindow,
-        firstBatchAt: plan.batches[0]?.scheduledFor ?? null,
-        estimatedEnd: plan.estimatedEnd,
+        days: sum.days,
+        batches: sum.batches,
+        chips: chips.length,
+        effectiveDailyCap: sum.effectiveDailyCap,
+        capLimitedByWindow: sum.capLimitedByWindow,
+        firstBatchAt: sum.firstBatchAt,
+        estimatedEnd: sum.estimatedEnd,
       };
     } catch (err: any) {
       return { recipients: sendable, error: err.message };
     }
+  }
+
+  /**
+   * Define os chips (canais) do rodízio e o teto diário de cada um. O canal primário é obrigatório e seu
+   * teto é `Campaign.dailyCap` (fonte da verdade). Só antes de iniciar.
+   */
+  async setChannels(orgId: string, id: string, access: ChannelAccess, dto: SetCampaignChannelsDto) {
+    const campaign = await this.getOwned(orgId, id, access);
+    if (!EDITABLE.includes(campaign.status)) {
+      throw new ConflictException('Os canais só podem ser alterados antes de iniciar a campanha');
+    }
+    const ids = dto.channels.map((c) => c.channelId);
+    if (new Set(ids).size !== ids.length) throw new UnprocessableEntityException('Canal repetido na lista');
+    if (!ids.includes(campaign.channelId)) {
+      throw new UnprocessableEntityException('O canal da campanha (primário) precisa continuar no rodízio');
+    }
+
+    const found = await this.prisma.channel.findMany({
+      where: { id: { in: ids }, organizationId: orgId, deletedAt: null, isActive: true },
+    });
+    for (const cid of ids) {
+      const ch = found.find((c) => c.id === cid);
+      if (!ch) throw new NotFoundException('Um dos canais não foi encontrado ou está inativo');
+      this.channelAccess.assertChannelAccess(access, ch.id);
+      if (!this.registry.hasBulkSender(ch.type)) {
+        throw new UnprocessableEntityException(`O canal "${ch.name}" não suporta envio em massa`);
+      }
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.campaignChannel.deleteMany({ where: { campaignId: id, channelId: { notIn: ids } } });
+      for (const [position, item] of dto.channels.entries()) {
+        const isPrimary = item.channelId === campaign.channelId;
+        await tx.campaignChannel.upsert({
+          where: { uq_campaign_channel: { campaignId: id, channelId: item.channelId } },
+          create: { campaignId: id, channelId: item.channelId, dailyLimit: item.dailyLimit, position: isPrimary ? 0 : position + 1 },
+          update: { dailyLimit: item.dailyLimit, position: isPrimary ? 0 : position + 1 },
+        });
+        if (isPrimary) await tx.campaign.update({ where: { id }, data: { dailyCap: item.dailyLimit } });
+      }
+    });
+
+    const fresh = await this.getOwned(orgId, id, access);
+    return { channels: await this.chipBreakdown(fresh), estimate: await this.estimate(fresh) };
   }
 
   // ─── Import ────────────────────────────────────────────────────────
@@ -322,6 +422,8 @@ export class CampaignsService {
             consentSource: dto.consentSource,
             consentNote: dto.consentNote?.trim() || null,
             sourceFileName: file.originalname?.slice(0, 200) ?? null,
+            // O canal do import é o chip primário do rodízio (outros chips entram em PUT /:id/channels).
+            channels: { create: { channelId: channel.id, dailyLimit: 200, position: 0 } },
           },
         });
         for (let i = 0; i < drafts.length; i += 1000) {
@@ -465,6 +567,13 @@ export class CampaignsService {
         ...(dto.appendOptOutFooter !== undefined && { appendOptOutFooter: dto.appendOptOutFooter }),
       },
     });
+    if (dto.dailyCap !== undefined) {
+      // `Campaign.dailyCap` é o teto do chip primário: mantém a linha do rodízio coerente.
+      await this.prisma.campaignChannel.updateMany({
+        where: { campaignId: id, channelId: campaign.channelId },
+        data: { dailyLimit: dto.dailyCap },
+      });
+    }
     // O segredo só sai UMA vez, na resposta que o gerou (ou na rotação); depois só `onReplyWebhookSecretSet`.
     return { ...maskCampaign(updated), estimate: await this.estimate(updated), ...(generatedSecret && { webhookSecret: generatedSecret }) };
   }
@@ -477,14 +586,37 @@ export class CampaignsService {
     if (campaign.status !== 'READY') {
       throw new ConflictException('A campanha precisa estar validada (READY) para iniciar');
     }
-    const channel = await this.prisma.channel.findFirst({
+
+    // Chips do rodízio: o primário + os demais, todos ativos, com acesso, com bulk sender e conectados.
+    const primary = await this.prisma.channel.findFirst({
       where: { id: campaign.channelId, organizationId: orgId, deletedAt: null, isActive: true },
     });
-    if (!channel) throw new NotFoundException('Canal não encontrado');
-    const bulk = this.engine.bulkFor(channel);
-
-    const connected = await bulk.isConnected(channel).catch(() => true);
-    if (!connected) throw new ConflictException('O canal está desconectado. Reconecte antes de iniciar');
+    if (!primary) throw new NotFoundException('Canal não encontrado');
+    const extraRows = await this.prisma.campaignChannel.findMany({
+      where: { campaignId: id, channelId: { not: campaign.channelId } },
+      orderBy: { position: 'asc' },
+      include: { channel: true },
+    });
+    const chips: Array<{ channel: Channel; dailyLimit: number }> = [
+      { channel: primary, dailyLimit: campaign.dailyCap },
+      ...extraRows.map((r) => ({ channel: r.channel, dailyLimit: r.dailyLimit })),
+    ];
+    for (const [i, { channel }] of chips.entries()) {
+      // O primário já foi filtrado por org/ativo na consulta; os demais chips vêm do rodízio e são revalidados.
+      if (i > 0 && (channel.deletedAt || !channel.isActive || channel.organizationId !== orgId)) {
+        throw new NotFoundException(`O canal "${channel.name}" não está disponível`);
+      }
+      this.channelAccess.assertChannelAccess(access, channel.id);
+      const bulk = this.engine.bulkFor(channel);
+      const connected = await bulk.isConnected(channel).catch(() => true);
+      if (!connected) {
+        throw new ConflictException(
+          chips.length > 1
+            ? `O canal "${channel.name}" está desconectado. Reconecte ou remova-o do rodízio antes de iniciar`
+            : 'O canal está desconectado. Reconecte antes de iniciar',
+        );
+      }
+    }
 
     const org = await this.prisma.organization.findUnique({ where: { id: orgId }, select: { aiTimezone: true } });
     const valid = await this.prisma.campaignRecipient.findMany({
@@ -494,37 +626,47 @@ export class CampaignsService {
     });
     if (!valid.length) throw new UnprocessableEntityException('Nenhum destinatário válido para enviar');
 
-    const plan = planBatches({
-      recipientCount: valid.length,
-      dailyCap: campaign.dailyCap,
-      windowStart: campaign.sendWindowStart,
-      windowEnd: campaign.sendWindowEnd,
-      weekdays: campaign.sendWeekdays,
-      timezone: org?.aiTimezone || 'America/Sao_Paulo',
-      delayMinSec: campaign.delayMinSec,
-      delayMaxSec: campaign.delayMaxSec,
-      notBefore: campaign.scheduledAt && campaign.scheduledAt > new Date() ? campaign.scheduledAt : new Date(),
-      batchSize: campaign.batchSize,
-      batchSizeMin: campaign.batchSizeMin,
-      startJitterMaxMin: campaign.startJitterMaxMin,
-      batchPauseMinSec: campaign.batchPauseMinSec,
-      batchPauseMaxSec: campaign.batchPauseMaxSec,
-    });
+    // Cada chip planeja a própria cadeia de lotes (teto, pausas e jitter de início independentes).
+    const plans = planChips(
+      chips.map((c) => ({ channelId: c.channel.id, dailyLimit: c.dailyLimit })),
+      valid.length,
+      {
+        windowStart: campaign.sendWindowStart,
+        windowEnd: campaign.sendWindowEnd,
+        weekdays: campaign.sendWeekdays,
+        timezone: org?.aiTimezone || 'America/Sao_Paulo',
+        delayMinSec: campaign.delayMinSec,
+        delayMaxSec: campaign.delayMaxSec,
+        notBefore: campaign.scheduledAt && campaign.scheduledAt > new Date() ? campaign.scheduledAt : new Date(),
+        batchSize: campaign.batchSize,
+        batchSizeMin: campaign.batchSizeMin,
+        startJitterMaxMin: campaign.startJitterMaxMin,
+        batchPauseMinSec: campaign.batchPauseMinSec,
+        batchPauseMaxSec: campaign.batchPauseMaxSec,
+      },
+    );
+    const summary = summarizeChipPlans(plans);
 
-    // Webhook precisa assinar `sender` (canais antigos foram configurados sem ele).
+    // Webhook precisa assinar `sender` em CADA chip (canais antigos foram configurados sem ele).
     const appUrl = this.config.get<string>('APP_URL');
     if (appUrl) {
-      await bulk
-        .ensureWebhook(channel, `${appUrl}/api/v1/webhooks/${channel.type}`)
-        .catch((e) => this.logger.warn(`ensureWebhook falhou: ${e.message}`));
+      for (const { channel } of chips) {
+        await this.engine
+          .bulkFor(channel)
+          .ensureWebhook(channel, `${appUrl}/api/v1/webhooks/${channel.type}`)
+          .catch((e) => this.logger.warn(`ensureWebhook falhou (${channel.name}): ${e.message}`));
+      }
     } else {
       this.logger.warn('APP_URL ausente: eventos "sender" não chegam; o reconcile cobre os status');
     }
 
-    // Transição + lotes numa transação. O índice parcial garante 1 campanha ativa por canal.
+    // Transição + lotes numa transação. Garantia de "uma campanha ativa por chip": o índice parcial cobre
+    // o canal primário; para os demais, trava consultiva por canal + contagem dentro da transação.
     let batches: Array<{ id: string; scheduledFor: Date }>;
     try {
       batches = await this.prisma.$transaction(async (tx) => {
+        await this.assertChipsFree(tx, id, chips.map((c) => ({ id: c.channel.id, name: c.channel.name })));
+
         const moved = await tx.campaign.updateMany({
           where: { id, status: 'READY' },
           data: { status: 'SUBMITTING', startedAt: new Date(), errorMessage: null, autoPausedReason: null },
@@ -532,17 +674,27 @@ export class CampaignsService {
         if (!moved.count) throw new ConflictException('A campanha já foi iniciada');
 
         const created: Array<{ id: string; scheduledFor: Date }> = [];
-        let offset = 0;
-        for (const p of plan.batches) {
-          const row = await tx.campaignBatch.create({
-            data: { campaignId: id, batchIndex: p.batchIndex, scheduledFor: p.scheduledFor, recipientCount: p.size },
-          });
-          await tx.campaignRecipient.updateMany({
-            where: { id: { in: valid.slice(offset, offset + p.size).map((v) => v.id) } },
-            data: { batchId: row.id },
-          });
-          offset += p.size;
-          created.push(row);
+        let batchIndex = 0; // único na campanha, contínuo entre os chips
+        for (const chip of plans) {
+          const chipRecipients = chip.recipientIndexes.map((ix) => valid[ix].id);
+          let offset = 0;
+          for (const p of chip.plan.batches) {
+            const row = await tx.campaignBatch.create({
+              data: {
+                campaignId: id,
+                channelId: chip.channelId,
+                batchIndex: batchIndex++,
+                scheduledFor: p.scheduledFor,
+                recipientCount: p.size,
+              },
+            });
+            await tx.campaignRecipient.updateMany({
+              where: { id: { in: chipRecipients.slice(offset, offset + p.size) } },
+              data: { batchId: row.id, channelId: chip.channelId },
+            });
+            offset += p.size;
+            created.push(row);
+          }
         }
         return created;
       });
@@ -560,11 +712,35 @@ export class CampaignsService {
     return {
       id,
       status: 'SUBMITTING',
-      batches: plan.batches.length,
-      effectiveDailyCap: plan.effectiveDailyCap,
-      capLimitedByWindow: plan.capLimitedByWindow,
-      estimatedEnd: plan.estimatedEnd,
+      batches: summary.batches,
+      chips: chips.length,
+      effectiveDailyCap: summary.effectiveDailyCap,
+      capLimitedByWindow: summary.capLimitedByWindow,
+      estimatedEnd: summary.estimatedEnd,
     };
+  }
+
+  /**
+   * Nenhum chip pode estar em outra campanha ativa. A trava consultiva (ordenada, para não gerar deadlock
+   * entre inícios concorrentes) serializa quem disputa o mesmo canal; a contagem roda já com a trava.
+   */
+  private async assertChipsFree(tx: Prisma.TransactionClient, campaignId: string, chips: Array<{ id: string; name: string }>) {
+    for (const c of [...chips].sort((a, b) => a.id.localeCompare(b.id))) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${c.id}))`;
+    }
+    const busy = await tx.campaignChannel.findFirst({
+      where: {
+        channelId: { in: chips.map((c) => c.id) },
+        campaignId: { not: campaignId },
+        campaign: { deletedAt: null, status: { in: [...ACTIVE_CAMPAIGN_STATUSES] } },
+      },
+      select: { channel: { select: { name: true } } },
+    });
+    if (busy) {
+      throw new ConflictException(
+        `O canal "${busy.channel.name}" já está em uma campanha ativa. Finalize ou cancele a anterior`,
+      );
+    }
   }
 
   async pause(orgId: string, id: string, access: ChannelAccess) {

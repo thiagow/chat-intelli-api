@@ -75,6 +75,30 @@ export class CampaignsEngine {
     return c.organization?.aiTimezone || 'America/Sao_Paulo';
   }
 
+  /**
+   * Canal (chip) que envia um lote/destinatário: o primário da campanha (legado / 1 chip, sem consulta
+   * extra) ou o chip atribuído no rodízio. `cache` evita reconsultar o mesmo canal num laço.
+   */
+  private async channelOf(c: CampaignWithChannel, channelId: string | null | undefined, cache?: Map<string, Channel>): Promise<Channel> {
+    if (!channelId || channelId === c.channelId) return c.channel;
+    const hit = cache?.get(channelId);
+    if (hit) return hit;
+    const ch = await this.prisma.channel.findUnique({ where: { id: channelId } });
+    if (!ch) throw new NotFoundException('Canal do lote não encontrado');
+    cache?.set(channelId, ch);
+    return ch;
+  }
+
+  /** Teto diário do chip. Para o primário, `Campaign.dailyCap` é a fonte da verdade. */
+  private async dailyLimitOf(c: CampaignWithChannel, channelId: string | null | undefined): Promise<number> {
+    if (!channelId || channelId === c.channelId) return c.dailyCap;
+    const row = await this.prisma.campaignChannel.findUnique({
+      where: { uq_campaign_channel: { campaignId: c.id, channelId } },
+      select: { dailyLimit: true },
+    });
+    return row?.dailyLimit ?? c.dailyCap;
+  }
+
   async computeStats(campaignId: string): Promise<CampaignStats> {
     const [groups, replied] = await Promise.all([
       this.prisma.campaignRecipient.groupBy({
@@ -298,13 +322,15 @@ export class CampaignsEngine {
     if (!campaign || !batch || batch.campaignId !== campaignId) return { skipped: 'not_found' };
     if (!['SUBMITTING', 'SCHEDULED', 'RUNNING'].includes(campaign.status)) return { skipped: 'campaign_not_active' };
     if (!['PLANNED', 'SUBMITTING'].includes(batch.status)) return { skipped: 'batch_not_pending' };
+    const channel = await this.channelOf(campaign, batch.channelId);
 
     // Lote anterior ainda ativo → um lote só entra depois que o anterior termina (o window-guard
     // fecha o anterior no fim da janela). Reverifica em 1 min: assim a pausa começa logo após o término real.
     let notBefore = Math.max(Date.now(), batch.scheduledFor.getTime());
     if (batch.batchIndex > 0) {
       const prev = await this.prisma.campaignBatch.findFirst({
-        where: { campaignId, batchIndex: { lt: batch.batchIndex } },
+        // Cada chip tem a própria cadeia: o "lote anterior" é o do MESMO chip.
+        where: { campaignId, batchIndex: { lt: batch.batchIndex }, ...(batch.channelId ? { channelId: batch.channelId } : {}) },
         orderBy: { batchIndex: 'desc' },
         select: { id: true, status: true, completedAt: true },
       });
@@ -392,8 +418,8 @@ export class CampaignsEngine {
         part.map(async (r) => {
           const p = await this.provisioning.provision(
             campaign.organizationId,
-            campaign.channelId,
-            campaign.channel.type,
+            channel.id,
+            channel.type,
             {
               phone: r.phoneE164!,
               name: r.companyName || null,
@@ -420,15 +446,15 @@ export class CampaignsEngine {
     }
 
     // Idempotência: antes de criar, procura pasta já criada para este lote (timeout + retry).
-    const bulk = this.bulkFor(campaign.channel);
+    const bulk = this.bulkFor(channel);
     const info = `ic:${campaignId}:${batch.batchIndex}`;
     let folderId = batch.providerFolderId ?? undefined;
     if (!folderId) {
-      const existing = (await bulk.listFolders(campaign.channel)).find((f) => f.info === info);
+      const existing = (await bulk.listFolders(channel)).find((f) => f.info === info);
       folderId = existing?.folderId;
     }
     if (!folderId) {
-      const created = await bulk.createFolder(campaign.channel, {
+      const created = await bulk.createFolder(channel, {
         messages: sendable.map((r) => ({
           number: stripWhatsappJid(r.jid ?? r.phoneE164!),
           text: prepared.get(r.id)!.rendered,
@@ -460,7 +486,7 @@ export class CampaignsEngine {
     const after = await this.prisma.campaign.findUnique({ where: { id: campaignId }, select: { status: true } });
     if (!promoted.count || !after || !['SUBMITTING', 'SCHEDULED', 'RUNNING'].includes(after.status)) {
       try {
-        await bulk.controlFolder(campaign.channel, folderId, 'stop');
+        await bulk.controlFolder(channel, folderId, 'stop');
       } catch (err: any) {
         this.logger.warn(`stop da pasta ${folderId} (corrida com pausa/cancelamento) falhou: ${err.message}`);
       }
@@ -503,7 +529,8 @@ export class CampaignsEngine {
 
     if (batch.providerFolderId) {
       try {
-        await this.bulkFor(campaign.channel).controlFolder(campaign.channel, batch.providerFolderId, 'stop');
+        const ch = await this.channelOf(campaign, batch.channelId);
+        await this.bulkFor(ch).controlFolder(ch, batch.providerFolderId, 'stop');
       } catch (err: any) {
         this.logger.warn(`stop da pasta ${batch.providerFolderId} falhou: ${err.message}`);
       }
@@ -517,7 +544,7 @@ export class CampaignsEngine {
     // Ordem importa: o lote de sobra (PLANNED) precisa existir ANTES de este virar DONE,
     // senão um reconcile concorrente vê "nenhum lote aberto" e conclui a campanha.
     if (leftovers.length && ['SCHEDULED', 'RUNNING'].includes(campaign.status)) {
-      await this.carryOver(campaign, leftovers.map((l) => l.id));
+      await this.carryOver(campaign, leftovers.map((l) => l.id), batch.channelId);
     }
     await this.prisma.campaignBatch.update({
       where: { id: batchId },
@@ -526,9 +553,13 @@ export class CampaignsEngine {
     await this.afterBatchDone(campaignId);
   }
 
-  private async carryOver(campaign: CampaignWithChannel, recipientIds: string[]): Promise<void> {
+  /**
+   * O que sobrou de um lote vai para o próximo lote PLANEJADO do MESMO chip; se não houver, planeja
+   * novos lotes para esse chip (com o teto diário dele).
+   */
+  private async carryOver(campaign: CampaignWithChannel, recipientIds: string[], chipId: string | null): Promise<void> {
     const next = await this.prisma.campaignBatch.findFirst({
-      where: { campaignId: campaign.id, status: 'PLANNED' },
+      where: { campaignId: campaign.id, status: 'PLANNED', ...(chipId ? { channelId: chipId } : {}) },
       orderBy: { batchIndex: 'asc' },
     });
     await this.prisma.campaignRecipient.updateMany({
@@ -549,7 +580,7 @@ export class CampaignsEngine {
     });
     const plan = planBatches({
       recipientCount: recipientIds.length,
-      dailyCap: campaign.dailyCap,
+      dailyCap: await this.dailyLimitOf(campaign, chipId),
       windowStart: campaign.sendWindowStart,
       windowEnd: campaign.sendWindowEnd,
       weekdays: campaign.sendWeekdays,
@@ -564,6 +595,7 @@ export class CampaignsEngine {
       const row = await this.prisma.campaignBatch.create({
         data: {
           campaignId: campaign.id,
+          channelId: chipId ?? campaign.channelId,
           batchIndex: (last?.batchIndex ?? -1) + 1 + p.batchIndex,
           scheduledFor: p.scheduledFor,
           recipientCount: p.size,
@@ -602,16 +634,6 @@ export class CampaignsEngine {
     const active = ['SUBMITTING', 'SCHEDULED', 'RUNNING'].includes(campaign.status);
     if (!active && !opts.forceBatchIds) return;
 
-    const bulk = this.bulkFor(campaign.channel);
-
-    if (active && !opts.forceBatchIds) {
-      const connected = await bulk.isConnected(campaign.channel).catch(() => true);
-      if (!connected) {
-        await this.pauseCampaign(campaignId, 'CHANNEL_DISCONNECTED');
-        return;
-      }
-    }
-
     const batches = await this.prisma.campaignBatch.findMany({
       where: {
         campaignId,
@@ -620,30 +642,49 @@ export class CampaignsEngine {
       },
     });
 
-    let folders = new Map<string, { status?: string; sent?: number }>();
-    try {
-      folders = new Map((await bulk.listFolders(campaign.channel)).map((f) => [f.folderId, f]));
-    } catch (err: any) {
-      this.logger.warn(`listFolders falhou (${campaignId}): ${err.message}`);
+    // Chips envolvidos: o primário + os dos lotes em andamento.
+    const channelCache = new Map<string, Channel>();
+    const chipIds = [...new Set([campaign.channelId, ...batches.map((b) => b.channelId ?? campaign.channelId)])];
+    const chips = await Promise.all(chipIds.map((id) => this.channelOf(campaign, id, channelCache)));
+
+    if (active && !opts.forceBatchIds) {
+      for (const ch of chips) {
+        const connected = await this.bulkFor(ch).isConnected(ch).catch(() => true);
+        if (!connected) {
+          // Com vários chips o motivo diz qual caiu.
+          await this.pauseCampaign(campaignId, chips.length > 1 ? `CHANNEL_DISCONNECTED:${ch.name}` : 'CHANNEL_DISCONNECTED');
+          return;
+        }
+      }
+    }
+
+    const foldersByChip = new Map<string, Map<string, { status?: string; sent?: number }>>();
+    for (const ch of chips) {
+      try {
+        foldersByChip.set(ch.id, new Map((await this.bulkFor(ch).listFolders(ch)).map((f) => [f.folderId, f])));
+      } catch (err: any) {
+        this.logger.warn(`listFolders falhou (${campaignId}/${ch.id}): ${err.message}`);
+      }
     }
 
     for (const batch of batches) {
       try {
-        await this.reconcileBatch(campaign, batch, folders.get(batch.providerFolderId!));
+        const ch = await this.channelOf(campaign, batch.channelId, channelCache);
+        await this.reconcileBatch(campaign, batch, ch, foldersByChip.get(ch.id)?.get(batch.providerFolderId!));
       } catch (err: any) {
         this.logger.warn(`reconcile do lote ${batch.id} falhou: ${err.message}`);
       }
     }
 
-    const stats = await this.emitProgress(campaignId);
-    const attempted = stats.sent + stats.failed;
-    if (
-      active &&
-      attempted >= CAMPAIGN_LIMITS.autoPauseMinSample &&
-      (stats.failed / attempted) * 100 > campaign.maxFailureRatePct
-    ) {
-      await this.pauseCampaign(campaignId, 'FAILURE_RATE');
-      return;
+    await this.emitProgress(campaignId);
+    if (active) {
+      // Taxa de falha POR CHIP: um número com problema não pode ser diluído pelos saudáveis.
+      const bad = await this.chipOverFailureLimit(campaignId, campaign.maxFailureRatePct);
+      if (bad) {
+        const named = bad.chipId && chipIds.length > 1 ? (await this.channelOf(campaign, bad.chipId, channelCache)).name : null;
+        await this.pauseCampaign(campaignId, named ? `FAILURE_RATE:${named}` : 'FAILURE_RATE');
+        return;
+      }
     }
     await this.afterBatchDone(campaignId);
 
@@ -655,12 +696,39 @@ export class CampaignsEngine {
     }
   }
 
+  /** Primeiro chip cuja taxa de falha passa do limite (amostra mínima respeitada), ou null. */
+  private async chipOverFailureLimit(campaignId: string, maxPct: number): Promise<{ chipId: string | null } | null> {
+    // groupBy com 2 campos: a inferência genérica do Prisma não fecha, então tipa o resultado à mão.
+    const rows = (await this.prisma.campaignRecipient.groupBy({
+      by: ['channelId', 'status'],
+      where: { campaignId },
+      orderBy: [{ channelId: 'asc' }, { status: 'asc' }],
+      _count: { _all: true },
+    } as never)) as unknown as Array<{ channelId?: string | null; status: string; _count: { _all: number } }>;
+    const byChip = new Map<string, { sent: number; failed: number; id: string | null }>();
+    for (const r of rows) {
+      const key = r.channelId ?? '';
+      const agg = byChip.get(key) ?? { sent: 0, failed: 0, id: r.channelId ?? null };
+      if (['SENT', 'DELIVERED', 'READ'].includes(r.status)) agg.sent += r._count._all;
+      if (r.status === 'FAILED') agg.failed += r._count._all;
+      byChip.set(key, agg);
+    }
+    for (const agg of byChip.values()) {
+      const attempted = agg.sent + agg.failed;
+      if (attempted >= CAMPAIGN_LIMITS.autoPauseMinSample && (agg.failed / attempted) * 100 > maxPct) {
+        return { chipId: agg.id };
+      }
+    }
+    return null;
+  }
+
   private async reconcileBatch(
     campaign: CampaignWithChannel,
     batch: CampaignBatch,
+    channel: Channel,
     folder: { status?: string; sent?: number } | undefined,
   ): Promise<void> {
-    const bulk = this.bulkFor(campaign.channel);
+    const bulk = this.bulkFor(channel);
     const recipients = await this.prisma.campaignRecipient.findMany({
       where: { batchId: batch.id, status: { in: ['QUEUED', 'SENT', 'DELIVERED', 'READ'] } },
     });
@@ -671,7 +739,7 @@ export class CampaignsEngine {
     let offset = 0;
     let anySent = false;
     for (;;) {
-      const page = await bulk.listFolderMessages(campaign.channel, batch.providerFolderId!, { limit: 1000, offset });
+      const page = await bulk.listFolderMessages(channel, batch.providerFolderId!, { limit: 1000, offset });
       for (const m of page.messages) {
         const r = byNumber.get(phoneMatchKey(m.chatId));
         if (!r) continue;
@@ -715,7 +783,12 @@ export class CampaignsEngine {
 
   async handleSenderEvent(channelId: string, event: { folderId: string; status: string }): Promise<void> {
     const batch = await this.prisma.campaignBatch.findFirst({
-      where: { providerFolderId: event.folderId, campaign: { channelId, deletedAt: null } },
+      // O canal que recebeu o webhook é o chip do lote (ou, em lote legado sem chip, o primário da campanha).
+      where: {
+        providerFolderId: event.folderId,
+        campaign: { deletedAt: null },
+        OR: [{ channelId }, { channelId: null, campaign: { channelId } }],
+      },
       select: { id: true, campaignId: true },
     });
     if (!batch) return;
@@ -731,7 +804,6 @@ export class CampaignsEngine {
   async pauseCampaign(campaignId: string, autoReason: string | null): Promise<void> {
     const campaign = await this.loadCampaign(campaignId);
     if (!campaign) throw new NotFoundException('Campanha não encontrada');
-    const bulk = this.bulkFor(campaign.channel);
 
     const moved = await this.prisma.campaign.updateMany({
       where: { id: campaignId, status: { in: ['SUBMITTING', 'SCHEDULED', 'RUNNING'] } },
@@ -742,9 +814,11 @@ export class CampaignsEngine {
     const batches = await this.prisma.campaignBatch.findMany({
       where: { campaignId, status: { in: ['SCHEDULED', 'RUNNING'] }, providerFolderId: { not: null } },
     });
+    const cache = new Map<string, Channel>();
     for (const b of batches) {
       try {
-        await bulk.controlFolder(campaign.channel, b.providerFolderId!, 'stop');
+        const ch = await this.channelOf(campaign, b.channelId, cache);
+        await this.bulkFor(ch).controlFolder(ch, b.providerFolderId!, 'stop');
       } catch (err: any) {
         this.logger.warn(`stop da pasta ${b.providerFolderId} falhou: ${err.message}`);
       }
@@ -758,7 +832,7 @@ export class CampaignsEngine {
   async resumeCampaign(campaignId: string): Promise<void> {
     const campaign = await this.loadCampaign(campaignId);
     if (!campaign) throw new NotFoundException('Campanha não encontrada');
-    const bulk = this.bulkFor(campaign.channel);
+    const cache = new Map<string, Channel>();
 
     const batches = await this.prisma.campaignBatch.findMany({
       where: { campaignId, status: { in: ['PLANNED', 'SUBMITTING', 'SCHEDULED', 'RUNNING'] } },
@@ -779,7 +853,8 @@ export class CampaignsEngine {
         const insideWindow = Math.abs(nowStart.getTime() - Date.now()) < 60_000;
         if (insideWindow) {
           try {
-            await bulk.controlFolder(campaign.channel, b.providerFolderId, 'continue');
+            const ch = await this.channelOf(campaign, b.channelId, cache);
+            await this.bulkFor(ch).controlFolder(ch, b.providerFolderId, 'continue');
           } catch (err: any) {
             this.logger.warn(`continue da pasta ${b.providerFolderId} falhou: ${err.message}`);
           }
@@ -799,7 +874,7 @@ export class CampaignsEngine {
   async cancelCampaign(campaignId: string): Promise<void> {
     const campaign = await this.loadCampaign(campaignId);
     if (!campaign) throw new NotFoundException('Campanha não encontrada');
-    const bulk = this.bulkFor(campaign.channel);
+    const cache = new Map<string, Channel>();
 
     const moved = await this.prisma.campaign.updateMany({
       where: { id: campaignId, status: { in: ['DRAFT', 'VALIDATING', 'READY', 'SUBMITTING', 'SCHEDULED', 'RUNNING', 'PAUSED'] } },
@@ -813,7 +888,8 @@ export class CampaignsEngine {
     for (const b of batches) {
       if (b.providerFolderId) {
         try {
-          await bulk.controlFolder(campaign.channel, b.providerFolderId, 'stop');
+          const ch = await this.channelOf(campaign, b.channelId, cache);
+          await this.bulkFor(ch).controlFolder(ch, b.providerFolderId, 'stop');
         } catch (err: any) {
           this.logger.warn(`stop da pasta ${b.providerFolderId} falhou: ${err.message}`);
         }
@@ -837,7 +913,7 @@ export class CampaignsEngine {
   async sendNow(campaignId: string): Promise<number> {
     const campaign = await this.loadCampaign(campaignId);
     if (!campaign) throw new NotFoundException('Campanha não encontrada');
-    const bulk = this.bulkFor(campaign.channel);
+    const cache = new Map<string, Channel>();
 
     // Lotes ainda não entregues ao provider (a submissão é preguiçosa: 10 min antes da janela)
     // são submetidos agora; em seguida o send_now antecipa a pasta já criada.
@@ -855,7 +931,10 @@ export class CampaignsEngine {
     const batches = await this.prisma.campaignBatch.findMany({
       where: { campaignId, status: 'SCHEDULED', providerFolderId: { not: null } },
     });
-    for (const b of batches) await bulk.controlFolder(campaign.channel, b.providerFolderId!, 'send_now');
+    for (const b of batches) {
+      const ch = await this.channelOf(campaign, b.channelId, cache);
+      await this.bulkFor(ch).controlFolder(ch, b.providerFolderId!, 'send_now');
+    }
     await this.scheduleReconcile(campaignId, 5_000);
     return batches.length;
   }
